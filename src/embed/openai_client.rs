@@ -154,6 +154,7 @@ mod tests {
         format!("http://{}", addr)
     }
 
+    #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
     #[tokio::test]
     async fn openai_client_decodes_embeddings_from_data_array() {
         let url = spawn_test_server(200, r#"{ "data": [ { "embedding": [1.0, 2.0] } ] }"#);

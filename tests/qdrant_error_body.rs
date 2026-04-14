@@ -33,6 +33,7 @@ fn test_point() -> VectorPoint {
     }
 }
 
+#[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
 #[tokio::test]
 async fn qdrant_non_success_status_includes_response_body_in_error_message() {
     let base_url = spawn_test_server(400, r#"{"status":"error","message":"wrong vector size"}"#);

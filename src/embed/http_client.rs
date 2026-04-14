@@ -130,6 +130,7 @@ mod tests {
         format!("http://{addr}")
     }
 
+    #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
     #[tokio::test]
     async fn non_success_status_is_reported_as_error() {
         let endpoint = spawn_test_server(500, r#"{"error":"boom"}"#);
@@ -150,6 +151,7 @@ mod tests {
         assert!(err.to_string().contains("non-success"));
     }
 
+    #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
     #[tokio::test]
     async fn decodes_embeddings_from_success_response() {
         let endpoint = spawn_test_server(200, r#"{"embeddings":[[1.0,2.0],[3.0,4.0]]}"#);

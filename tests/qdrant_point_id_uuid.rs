@@ -4,6 +4,7 @@ use std::time::Duration;
 use ragloom::sink::qdrant::{QdrantConfig, QdrantSink};
 use ragloom::sink::{PointId, Sink, VectorPoint};
 
+#[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
 #[tokio::test]
 async fn qdrant_sink_sends_uuid_point_ids() {
     // Arrange: a stub server that validates the outgoing JSON contains UUID point ids.

@@ -1,0 +1,38 @@
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"
+
+rust:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/**"
+          - "tests/**"
+          - "Cargo.toml"
+          - "Cargo.lock"
+
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "README.md"
+          - "docs/**"
+          - "CONTRIBUTING.md"
+          - "SECURITY.md"
+          - "SUPPORT.md"
+
+release:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "Dockerfile"
+          - ".dockerignore"
+          - ".github/workflows/release.yml"
+          - ".github/workflows/publish-crate.yml"
+          - ".github/workflows/container.yml"
+
+security:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "SECURITY.md"
+          - "deny.toml"
+          - ".github/workflows/governance.yml"
+          - ".github/workflows/quality-deep.yml"

@@ -84,12 +84,14 @@ impl Sink for QdrantSink {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<failed to read body>".to_string());
-            return Err(RagloomError::from_kind(RagloomErrorKind::Sink).with_context(format!(
-                "qdrant upsert returned non-success status (url={}, status={}, body={})",
-                self.upsert_url(),
-                status,
-                body
-            )));
+            return Err(
+                RagloomError::from_kind(RagloomErrorKind::Sink).with_context(format!(
+                    "qdrant upsert returned non-success status (url={}, status={}, body={})",
+                    self.upsert_url(),
+                    status,
+                    body
+                )),
+            );
         }
 
         let decoded: QdrantResponse = response.json().await.map_err(|e| {
@@ -167,6 +169,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
     #[tokio::test]
     async fn non_success_status_is_reported_as_error() {
         let base_url = spawn_test_server(500, r#"{"status":"error"}"#);
@@ -187,6 +190,7 @@ mod tests {
         assert!(err.to_string().contains("non-success"));
     }
 
+    #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
     #[tokio::test]
     async fn ok_body_is_accepted() {
         let base_url = spawn_test_server(200, r#"{"status":"ok"}"#);
@@ -201,6 +205,7 @@ mod tests {
         sink.upsert_points(vec![test_point()]).await.expect("ok");
     }
 
+    #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
     #[tokio::test]
     async fn non_ok_body_is_reported_as_error() {
         let base_url = spawn_test_server(200, r#"{"status":"error"}"#);
