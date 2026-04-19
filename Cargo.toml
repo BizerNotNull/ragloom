@@ -21,12 +21,15 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "fs", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+chunk = "0.10"
+tiktoken-rs = "0.11"
 
 [dev-dependencies]
 criterion = "0.5"
 loom = "0.7"
 tempfile = "3"
 tracing-test = "0.2"
+proptest = "1"
 
 [features]
 loom = []
