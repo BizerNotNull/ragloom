@@ -10,12 +10,14 @@ mod engine;
 mod error;
 mod fingerprint;
 mod legacy;
+pub mod markdown;
 mod public_types;
 pub mod recursive;
 pub mod size;
 
 pub use error::{ChunkError, ChunkResult};
 pub use fingerprint::StrategyFingerprint;
+pub use markdown::MarkdownChunker;
 pub use public_types::{BoundaryKind, Chunk, ChunkedDocument};
 pub use recursive::RecursiveChunker;
 pub use size::{CharCounter, SizeMetric, TiktokenCounter, TokenCounter};
