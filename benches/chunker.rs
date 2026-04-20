@@ -1,56 +1,68 @@
-//! Chunker benchmark.
+//! Chunker throughput benchmark — legacy shim vs direct RecursiveChunker.
 //!
 //! # Why
-//! Chunking can become a throughput bottleneck in large ingestions. We keep a
-//! dedicated benchmark to track regressions as strategies evolve.
+//! Phase 1 preserves the legacy API through a deprecated shim. This bench
+//! confirms the shim does not introduce a meaningful overhead relative to a
+//! direct `Chunker` trait call, and measures throughput across a range of
+//! document sizes for future regression tracking.
 
-use std::hint::black_box;
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use ragloom::transform::chunker::{
+    Chunker,
+    recursive::{RecursiveChunker, RecursiveConfig},
+    size::SizeMetric,
+};
+#[allow(deprecated)]
+use ragloom::transform::chunker::{ChunkerConfig, chunk_document};
 
-use criterion::{Criterion, criterion_group, criterion_main};
-
-use ragloom::transform::chunker::{ChunkerConfig, ChunkingStrategy, chunk_document, chunk_text};
-
-fn chunker_benchmark(c: &mut Criterion) {
-    let cfg = ChunkerConfig {
-        max_chars: 512,
-        min_chars: 128,
-        overlap_chars: 64,
-        strategy: ChunkingStrategy::BoundaryAware,
-    };
-
-    let ascii_64kb = "a".repeat(64 * 1024);
-    let mixed_unicode_64kb = "你好🙂résumé—".repeat((64 * 1024) / "你好🙂résumé—".len());
-    let long_line_64kb = "a".repeat(64 * 1024); // single long line (forced/whitespace)
-
-    c.bench_function("boundary_aware_ascii_64kb", |b| {
-        b.iter(|| {
-            let doc = chunk_document(&ascii_64kb, &cfg);
-            black_box(doc)
-        })
-    });
-
-    c.bench_function("boundary_aware_mixed_unicode_64kb", |b| {
-        b.iter(|| {
-            let doc = chunk_document(&mixed_unicode_64kb, &cfg);
-            black_box(doc)
-        })
-    });
-
-    c.bench_function("boundary_aware_long_line_64kb", |b| {
-        b.iter(|| {
-            let doc = chunk_document(&long_line_64kb, &cfg);
-            black_box(doc)
-        })
-    });
-
-    // Keep legacy adapter benchmark for regressions.
-    c.bench_function("chunk_text_64kb_512", |b| {
-        b.iter(|| {
-            let chunks = chunk_text(&ascii_64kb, cfg);
-            black_box(chunks)
-        })
-    });
+fn sample(size: usize) -> String {
+    let base = "The quick brown fox jumps over the lazy dog. ";
+    let mut s = String::with_capacity(size);
+    let mut i = 0usize;
+    while s.len() < size {
+        s.push_str(base);
+        i += 1;
+        if i.is_multiple_of(5) {
+            s.push_str("\n\n");
+        }
+    }
+    s.truncate(size);
+    s
 }
 
-criterion_group!(benches, chunker_benchmark);
+fn bench(c: &mut Criterion) {
+    let sizes = [4 * 1024usize, 64 * 1024, 512 * 1024, 2 * 1024 * 1024];
+    let mut group = c.benchmark_group("chunker");
+    for &n in &sizes {
+        let text = sample(n);
+        group.throughput(Throughput::Bytes(text.len() as u64));
+
+        group.bench_with_input(BenchmarkId::new("legacy_shim", n), &text, |b, text| {
+            #[allow(deprecated)]
+            let cfg = ChunkerConfig::new(512);
+            b.iter(|| {
+                #[allow(deprecated)]
+                let _ = chunk_document(text, &cfg);
+            });
+        });
+
+        group.bench_with_input(
+            BenchmarkId::new("recursive_chars_512", n),
+            &text,
+            |b, text| {
+                let chk = RecursiveChunker::new(RecursiveConfig {
+                    metric: SizeMetric::Chars,
+                    max_size: 512,
+                    min_size: 0,
+                    overlap: 0,
+                })
+                .unwrap();
+                b.iter(|| chk.chunk(text).unwrap());
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench);
 criterion_main!(benches);
