@@ -9,6 +9,7 @@
 #![allow(deprecated)]
 
 use super::Chunker;
+use super::ChunkHint;
 use super::public_types::{BoundaryKind, Chunk, ChunkedDocument};
 use super::recursive::{RecursiveChunker, RecursiveConfig};
 use super::size::SizeMetric;
@@ -76,10 +77,18 @@ fn to_recursive(cfg: &ChunkerConfig) -> RecursiveConfig {
 pub fn chunk_document(text: &str, cfg: &ChunkerConfig) -> ChunkedDocument {
     let rec = match RecursiveChunker::new(to_recursive(cfg)) {
         Ok(r) => r,
-        Err(_) => return ChunkedDocument { chunks: Vec::new() },
+        Err(_) => {
+            return ChunkedDocument {
+                chunks: Vec::new(),
+                strategy_fingerprint: super::StrategyFingerprint::new("legacy:v0|broken"),
+            }
+        }
     };
-    rec.chunk(text)
-        .unwrap_or(ChunkedDocument { chunks: Vec::new() })
+    rec.chunk(text, &super::ChunkHint::none())
+        .unwrap_or_else(|_| ChunkedDocument {
+            chunks: Vec::new(),
+            strategy_fingerprint: rec.fingerprint().clone(),
+        })
 }
 
 /// Splits `text` into chunks using a simple character budget (deprecated shim).
