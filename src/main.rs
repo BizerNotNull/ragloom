@@ -345,12 +345,33 @@ async fn try_main() -> Result<(), RagloomError> {
         _ => unreachable!("validated in parse_args"),
     };
 
+    if cfg.tokenizer != "tiktoken-cl100k" {
+        return Err(RagloomError::from_kind(RagloomErrorKind::Config)
+            .with_context(format!(
+                "unsupported --tokenizer: {} (phase 1 supports only: tiktoken-cl100k)",
+                cfg.tokenizer
+            )));
+    }
+    tracing::info!(
+        event.name = "ragloom.chunker.tokenizer_selected",
+        tokenizer = %cfg.tokenizer,
+        "ragloom.chunker.tokenizer_selected"
+    );
+
     let rec_cfg = ragloom::transform::chunker::recursive::RecursiveConfig {
         metric,
         max_size: cfg.size_max,
         min_size: cfg.size_min,
         overlap: cfg.size_overlap,
     };
+
+    if cfg.chunker_strategy == "legacy" {
+        tracing::warn!(
+            event.name = "ragloom.chunker.legacy_alias",
+            "--chunker-strategy=legacy currently routes through the recursive chunker; \
+             retained as a rollback seam for future phases"
+        );
+    }
 
     let chunker: std::sync::Arc<dyn ragloom::transform::chunker::Chunker> =
         match cfg.chunker_strategy.as_str() {
