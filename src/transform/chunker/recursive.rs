@@ -14,6 +14,7 @@ use super::engine::{
 use super::error::{ChunkError, ChunkResult};
 use super::fingerprint::StrategyFingerprint;
 use super::size::{SizeMetric, TokenCounter, counter_for};
+use super::ChunkHint;
 use super::{Chunk, ChunkedDocument, Chunker};
 
 fn map_kind(k: EngBoundaryKind) -> super::BoundaryKind {
@@ -83,6 +84,12 @@ impl RecursiveChunker {
 }
 
 impl Chunker for RecursiveChunker {
+    fn chunk(&self, text: &str, _hint: &ChunkHint<'_>) -> ChunkResult<ChunkedDocument> {
+        self.chunk_impl(text)
+    }
+}
+
+impl RecursiveChunker {
     #[tracing::instrument(
         name = "ragloom.chunker.recursive.chunk",
         skip(self, text),
@@ -91,9 +98,12 @@ impl Chunker for RecursiveChunker {
             strategy = %self.fingerprint,
         )
     )]
-    fn chunk(&self, text: &str) -> ChunkResult<ChunkedDocument> {
+    fn chunk_impl(&self, text: &str) -> ChunkResult<ChunkedDocument> {
         if self.cfg.max_size == 0 || text.is_empty() {
-            return Ok(ChunkedDocument { chunks: Vec::new() });
+            return Ok(ChunkedDocument {
+                chunks: Vec::new(),
+                strategy_fingerprint: self.fingerprint.clone(),
+            });
         }
 
         let normalized = normalize_newlines(text).into_owned();
@@ -182,11 +192,21 @@ impl Chunker for RecursiveChunker {
             "ragloom.chunker.recursive.done",
         );
 
-        Ok(ChunkedDocument { chunks })
+        Ok(ChunkedDocument {
+            chunks,
+            strategy_fingerprint: self.fingerprint.clone(),
+        })
     }
 
-    fn strategy_fingerprint(&self) -> &StrategyFingerprint {
+    /// Pre-computed strategy fingerprint for this configuration.
+    pub fn fingerprint(&self) -> &StrategyFingerprint {
         &self.fingerprint
+    }
+
+    /// Chunk WITHOUT the fingerprint wrapper — used by MarkdownChunker /
+    /// CodeChunker as an internal fallback so they can restamp.
+    pub fn chunk_raw(&self, text: &str) -> ChunkResult<Vec<super::Chunk>> {
+        Ok(self.chunk_impl(text)?.chunks)
     }
 }
 
@@ -314,19 +334,24 @@ mod tests {
     #[test]
     fn empty_input_produces_no_chunks() {
         let c = RecursiveChunker::new(chars_cfg(10)).unwrap();
-        assert!(c.chunk("").unwrap().chunks.is_empty());
+        assert!(c.chunk("", &ChunkHint::none()).unwrap().chunks.is_empty());
     }
 
     #[test]
     fn zero_budget_produces_no_chunks() {
         let c = RecursiveChunker::new(chars_cfg(0)).unwrap();
-        assert!(c.chunk("hello").unwrap().chunks.is_empty());
+        assert!(
+            c.chunk("hello", &ChunkHint::none())
+                .unwrap()
+                .chunks
+                .is_empty()
+        );
     }
 
     #[test]
     fn fixed_size_split_for_ascii() {
         let c = RecursiveChunker::new(chars_cfg(4)).unwrap();
-        let doc = c.chunk("abcdefghij").unwrap();
+        let doc = c.chunk("abcdefghij", &ChunkHint::none()).unwrap();
         let texts: Vec<&str> = doc.chunks.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, vec!["abcd", "efgh", "ij"]);
     }
@@ -334,7 +359,7 @@ mod tests {
     #[test]
     fn multibyte_unicode_does_not_panic() {
         let c = RecursiveChunker::new(chars_cfg(3)).unwrap();
-        let doc = c.chunk("你好世界🙂hello").unwrap();
+        let doc = c.chunk("你好世界🙂hello", &ChunkHint::none()).unwrap();
         assert!(!doc.chunks.is_empty());
         for ch in &doc.chunks {
             assert!(!ch.text.is_empty());
@@ -351,7 +376,9 @@ mod tests {
             metric: SizeMetric::Chars,
         };
         let c = RecursiveChunker::new(cfg).unwrap();
-        let doc = c.chunk("aaaa\n\nbbbb cccc\ndddd").unwrap();
+        let doc = c
+            .chunk("aaaa\n\nbbbb cccc\ndddd", &ChunkHint::none())
+            .unwrap();
         assert!(doc.chunks.len() >= 2);
         assert_eq!(doc.chunks[0].text, "aaaa");
         assert_eq!(
@@ -369,7 +396,7 @@ mod tests {
             metric: SizeMetric::Chars,
         };
         let c = RecursiveChunker::new(cfg).unwrap();
-        let doc = c.chunk("abcdefghij").unwrap();
+        let doc = c.chunk("abcdefghij", &ChunkHint::none()).unwrap();
         let texts: Vec<&str> = doc.chunks.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(texts, vec!["abcde", "defgh", "ghij"]);
     }
@@ -377,7 +404,7 @@ mod tests {
     #[test]
     fn fingerprint_is_stable_and_contains_parameters() {
         let c = RecursiveChunker::new(chars_cfg(123)).unwrap();
-        let fp = c.strategy_fingerprint().as_str();
+        let fp = c.fingerprint().as_str();
         assert!(fp.starts_with("recursive:v1|metric=chars"));
         assert!(fp.contains("max=123"));
     }
