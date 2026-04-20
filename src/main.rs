@@ -35,6 +35,9 @@ pub struct RunConfig {
     pub tokenizer: String,
     pub chunker_mode: String,
     pub chunker_single: Option<String>,
+    pub enable_semantic: bool,
+    pub semantic_provider: String,
+    pub semantic_percentile: u8,
 }
 
 /// Embedding backend selection.
@@ -82,6 +85,9 @@ pub fn parse_args(args: &[String]) -> Result<RunConfig, RagloomError> {
     let mut tokenizer: Option<String> = None;
     let mut chunker_mode: Option<String> = None;
     let mut chunker_single: Option<String> = None;
+    let mut enable_semantic = false;
+    let mut semantic_provider: Option<String> = None;
+    let mut semantic_percentile: Option<String> = None;
 
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
@@ -119,6 +125,11 @@ pub fn parse_args(args: &[String]) -> Result<RunConfig, RagloomError> {
             "--tokenizer" => tokenizer = next_value(),
             "--chunker-mode" => chunker_mode = next_value(),
             "--chunker-single" => chunker_single = next_value(),
+            "--enable-semantic" => {
+                enable_semantic = true;
+            }
+            "--semantic-provider" => semantic_provider = next_value(),
+            "--semantic-percentile" => semantic_percentile = next_value(),
             "--help" | "-h" => {
                 return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput).with_context(
                     "usage: ragloom --dir <path> --qdrant-url <url> --collection <name> [--embed-backend <openai|http>]",
@@ -269,6 +280,39 @@ pub fn parse_args(args: &[String]) -> Result<RunConfig, RagloomError> {
             .with_context("--chunker-mode=single requires --chunker-single"));
     }
 
+    let semantic_provider = semantic_provider.unwrap_or_else(|| "adapter".to_string());
+    match semantic_provider.as_str() {
+        "adapter" => {}
+        "fastembed" => {
+            #[cfg(not(feature = "fastembed"))]
+            {
+                return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput).with_context(
+                    "--semantic-provider=fastembed requires the \"fastembed\" Cargo feature",
+                ));
+            }
+        }
+        other => {
+            return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput).with_context(
+                format!("invalid --semantic-provider: {other} (expected: adapter|fastembed)"),
+            ));
+        }
+    }
+
+    let semantic_percentile = semantic_percentile
+        .map(|s| {
+            s.parse::<u8>().map_err(|e| {
+                RagloomError::from_kind(RagloomErrorKind::InvalidInput)
+                    .with_context(format!("--semantic-percentile must be 1..=99: {e}"))
+            })
+        })
+        .transpose()?
+        .unwrap_or(95);
+    if !(1..=99).contains(&semantic_percentile) {
+        return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput).with_context(
+            format!("--semantic-percentile must be in 1..=99, got {semantic_percentile}"),
+        ));
+    }
+
     Ok(RunConfig {
         dir,
         embed_backend,
@@ -282,6 +326,9 @@ pub fn parse_args(args: &[String]) -> Result<RunConfig, RagloomError> {
         tokenizer,
         chunker_mode,
         chunker_single,
+        enable_semantic,
+        semantic_provider,
+        semantic_percentile,
     })
 }
 
@@ -301,6 +348,13 @@ fn parse_code_lang(s: &str) -> Result<ragloom::transform::chunker::code::Languag
         "bash" => Ok(Language::Bash),
         other => Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput)
             .with_context(format!("unsupported language: {other}"))),
+    }
+}
+
+fn embedding_fingerprint(cfg: &RunConfig) -> String {
+    match &cfg.embed_backend {
+        EmbedBackend::OpenAi { model, .. } => format!("openai:{}", model),
+        EmbedBackend::Http { model, .. } => format!("http:{}", model),
     }
 }
 
@@ -345,6 +399,8 @@ async fn try_main() -> Result<(), RagloomError> {
 
     let runtime = Runtime::with_shared_wal(source, std::sync::Arc::clone(&wal));
     let (queue, shutdown) = AsyncRuntime::new(runtime, 128).start();
+
+    let embed_fingerprint = embedding_fingerprint(&cfg);
 
     let embedding: std::sync::Arc<dyn ragloom::embed::EmbeddingProvider + Send + Sync> =
         match cfg.embed_backend {
@@ -418,44 +474,93 @@ async fn try_main() -> Result<(), RagloomError> {
     }
 
     use ragloom::transform::chunker::{
-        Chunker, MarkdownChunker, default_router, recursive::RecursiveChunker,
+        Chunker, EmbeddingProviderAdapter, MarkdownChunker, SemanticChunker,
+        SemanticSignalProvider, default_router, recursive::RecursiveChunker, semantic_router,
     };
 
-    let chunker: std::sync::Arc<dyn Chunker> = match cfg.chunker_mode.as_str() {
-        "router" => std::sync::Arc::new(default_router(rec_cfg).map_err(|e| {
-            RagloomError::new(RagloomErrorKind::Config, e).with_context("invalid router config")
-        })?),
-        "single" => {
-            let kind = cfg.chunker_single.as_deref().unwrap();
-            match kind {
-                "recursive" => {
-                    std::sync::Arc::new(RecursiveChunker::new(rec_cfg).map_err(|e| {
-                        RagloomError::new(RagloomErrorKind::Config, e)
-                            .with_context("invalid chunker config")
-                    })?)
-                }
-                "markdown" => std::sync::Arc::new(MarkdownChunker::new(rec_cfg).map_err(|e| {
-                    RagloomError::new(RagloomErrorKind::Config, e)
-                        .with_context("invalid markdown config")
-                })?),
-                s if s.starts_with("code:") => {
-                    let lang = parse_code_lang(&s[5..])?;
-                    std::sync::Arc::new(
-                        ragloom::transform::chunker::CodeChunker::new(lang, rec_cfg).map_err(
-                            |e| {
-                                RagloomError::new(RagloomErrorKind::Config, e)
-                                    .with_context("invalid code config")
-                            },
-                        )?,
-                    )
-                }
-                other => {
-                    return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput)
-                        .with_context(format!("invalid --chunker-single: {other}")));
+    let chunker: std::sync::Arc<dyn Chunker> = if cfg.chunker_mode == "router"
+        && cfg.enable_semantic
+    {
+        let signal: std::sync::Arc<dyn SemanticSignalProvider> = match cfg.semantic_provider.as_str() {
+            "adapter" => std::sync::Arc::new(EmbeddingProviderAdapter::new(
+                std::sync::Arc::clone(&embedding),
+                embed_fingerprint.clone(),
+            )),
+            #[cfg(feature = "fastembed")]
+            "fastembed" => std::sync::Arc::new(
+                ragloom::transform::chunker::FastembedSignalProvider::new().map_err(|e| {
+                    RagloomError::new(RagloomErrorKind::Config, e).with_context("fastembed init")
+                })?,
+            ),
+            other => {
+                return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput)
+                    .with_context(format!("unsupported --semantic-provider: {other}")));
+            }
+        };
+        let semantic_chunker: std::sync::Arc<dyn Chunker> = std::sync::Arc::new(
+            SemanticChunker::new(signal, rec_cfg, cfg.semantic_percentile).map_err(|e| {
+                RagloomError::new(RagloomErrorKind::Config, e)
+                    .with_context("invalid semantic config")
+            })?,
+        );
+        std::sync::Arc::new(semantic_router(rec_cfg, semantic_chunker).map_err(|e| {
+            RagloomError::new(RagloomErrorKind::Config, e)
+                .with_context("invalid semantic router config")
+        })?)
+    } else {
+        match cfg.chunker_mode.as_str() {
+            "router" => std::sync::Arc::new(default_router(rec_cfg).map_err(|e| {
+                RagloomError::new(RagloomErrorKind::Config, e)
+                    .with_context("invalid router config")
+            })?),
+            "single" => {
+                let kind = cfg.chunker_single.as_deref().unwrap();
+                match kind {
+                    "semantic" => {
+                        let signal: std::sync::Arc<dyn SemanticSignalProvider> =
+                            std::sync::Arc::new(EmbeddingProviderAdapter::new(
+                                std::sync::Arc::clone(&embedding),
+                                embed_fingerprint.clone(),
+                            ));
+                        std::sync::Arc::new(
+                            SemanticChunker::new(signal, rec_cfg, cfg.semantic_percentile)
+                                .map_err(|e| {
+                                    RagloomError::new(RagloomErrorKind::Config, e)
+                                        .with_context("invalid semantic config")
+                                })?,
+                        )
+                    }
+                    "recursive" => {
+                        std::sync::Arc::new(RecursiveChunker::new(rec_cfg).map_err(|e| {
+                            RagloomError::new(RagloomErrorKind::Config, e)
+                                .with_context("invalid chunker config")
+                        })?)
+                    }
+                    "markdown" => {
+                        std::sync::Arc::new(MarkdownChunker::new(rec_cfg).map_err(|e| {
+                            RagloomError::new(RagloomErrorKind::Config, e)
+                                .with_context("invalid markdown config")
+                        })?)
+                    }
+                    s if s.starts_with("code:") => {
+                        let lang = parse_code_lang(&s[5..])?;
+                        std::sync::Arc::new(
+                            ragloom::transform::chunker::CodeChunker::new(lang, rec_cfg).map_err(
+                                |e| {
+                                    RagloomError::new(RagloomErrorKind::Config, e)
+                                        .with_context("invalid code config")
+                                },
+                            )?,
+                        )
+                    }
+                    other => {
+                        return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput)
+                            .with_context(format!("invalid --chunker-single: {other}")));
+                    }
                 }
             }
+            _ => unreachable!("validated in parse_args"),
         }
-        _ => unreachable!("validated in parse_args"),
     };
 
     let pipeline = PipelineExecutor::with_chunker(
@@ -554,6 +659,9 @@ mod tests {
                 tokenizer: "tiktoken-cl100k".to_string(),
                 chunker_mode: "router".to_string(),
                 chunker_single: None,
+                enable_semantic: false,
+                semantic_provider: "adapter".to_string(),
+                semantic_percentile: 95,
             }
         );
     }
