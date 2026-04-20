@@ -88,9 +88,8 @@ impl Chunker for ChunkerRouter {
 pub fn default_router(base: RecursiveConfig) -> ChunkResult<ChunkerRouter> {
     let default: Arc<dyn Chunker> = Arc::new(RecursiveChunker::new(base)?);
     let md: Arc<dyn Chunker> = Arc::new(MarkdownChunker::new(base)?);
-    let mk_code = |lang| -> ChunkResult<Arc<dyn Chunker>> {
-        Ok(Arc::new(CodeChunker::new(lang, base)?))
-    };
+    let mk_code =
+        |lang| -> ChunkResult<Arc<dyn Chunker>> { Ok(Arc::new(CodeChunker::new(lang, base)?)) };
 
     let rust = mk_code(Language::Rust)?;
     let py = mk_code(Language::Python)?;
@@ -152,7 +151,11 @@ mod tests {
         let router = default_router(cfg()).unwrap();
         let hint = ChunkHint::from_path("/tmp/notes.txt");
         let doc = router.chunk("hello world", &hint).unwrap();
-        assert!(doc.strategy_fingerprint.as_str().starts_with("recursive:v1"));
+        assert!(
+            doc.strategy_fingerprint
+                .as_str()
+                .starts_with("recursive:v1")
+        );
     }
 
     #[test]

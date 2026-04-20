@@ -9,7 +9,6 @@
 #![allow(deprecated)]
 
 use super::Chunker;
-use super::ChunkHint;
 use super::public_types::{BoundaryKind, Chunk, ChunkedDocument};
 use super::recursive::{RecursiveChunker, RecursiveConfig};
 use super::size::SizeMetric;
@@ -81,7 +80,7 @@ pub fn chunk_document(text: &str, cfg: &ChunkerConfig) -> ChunkedDocument {
             return ChunkedDocument {
                 chunks: Vec::new(),
                 strategy_fingerprint: super::StrategyFingerprint::new("legacy:v0|broken"),
-            }
+            };
         }
     };
     rec.chunk(text, &super::ChunkHint::none())

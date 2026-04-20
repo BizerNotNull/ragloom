@@ -52,10 +52,7 @@ impl<'a> ChunkHint<'a> {
     /// after the final `.`; returned borrowed from the input slice. Returns
     /// no extension for dotfiles (e.g. `.gitignore`) and files with no `.`.
     pub fn from_path(path: &'a str) -> Self {
-        let filename = path
-            .rsplit(|c| c == '/' || c == '\\')
-            .next()
-            .unwrap_or(path);
+        let filename = path.rsplit(['/', '\\']).next().unwrap_or(path);
         let extension = filename
             .rsplit_once('.')
             .and_then(|(stem, ext)| if stem.is_empty() { None } else { Some(ext) });

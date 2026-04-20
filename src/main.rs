@@ -285,9 +285,7 @@ pub fn parse_args(args: &[String]) -> Result<RunConfig, RagloomError> {
     })
 }
 
-fn parse_code_lang(
-    s: &str,
-) -> Result<ragloom::transform::chunker::code::Language, RagloomError> {
+fn parse_code_lang(s: &str) -> Result<ragloom::transform::chunker::code::Language, RagloomError> {
     use ragloom::transform::chunker::code::Language;
     match s {
         "rust" => Ok(Language::Rust),
@@ -430,12 +428,12 @@ async fn try_main() -> Result<(), RagloomError> {
         "single" => {
             let kind = cfg.chunker_single.as_deref().unwrap();
             match kind {
-                "recursive" => std::sync::Arc::new(RecursiveChunker::new(rec_cfg).map_err(
-                    |e| {
+                "recursive" => {
+                    std::sync::Arc::new(RecursiveChunker::new(rec_cfg).map_err(|e| {
                         RagloomError::new(RagloomErrorKind::Config, e)
                             .with_context("invalid chunker config")
-                    },
-                )?),
+                    })?)
+                }
                 "markdown" => std::sync::Arc::new(MarkdownChunker::new(rec_cfg).map_err(|e| {
                     RagloomError::new(RagloomErrorKind::Config, e)
                         .with_context("invalid markdown config")

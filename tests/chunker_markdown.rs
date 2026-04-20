@@ -2,13 +2,13 @@
 //! on a realistic sample.
 
 use ragloom::transform::chunker::{
-    recursive::RecursiveConfig, size::SizeMetric, ChunkHint, Chunker, MarkdownChunker,
+    ChunkHint, Chunker, MarkdownChunker, recursive::RecursiveConfig, size::SizeMetric,
 };
 
 #[test]
 fn sample_markdown_produces_markdown_fingerprint() {
-    let text = std::fs::read_to_string("tests/fixtures/markdown/sample.md")
-        .expect("fixture readable");
+    let text =
+        std::fs::read_to_string("tests/fixtures/markdown/sample.md").expect("fixture readable");
     let c = MarkdownChunker::new(RecursiveConfig {
         metric: SizeMetric::Chars,
         max_size: 200,

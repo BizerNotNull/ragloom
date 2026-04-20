@@ -8,13 +8,13 @@
 
 use std::sync::Arc;
 
+use super::ChunkHint;
 use super::engine::{
     Boundary, BoundaryKind as EngBoundaryKind, forced_boundary, normalize_newlines, scan_boundaries,
 };
 use super::error::{ChunkError, ChunkResult};
 use super::fingerprint::StrategyFingerprint;
 use super::size::{SizeMetric, TokenCounter, counter_for};
-use super::ChunkHint;
 use super::{Chunk, ChunkedDocument, Chunker};
 
 fn map_kind(k: EngBoundaryKind) -> super::BoundaryKind {

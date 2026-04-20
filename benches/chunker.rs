@@ -85,31 +85,39 @@ fn bench(c: &mut Criterion) {
         );
 
         let md_sample = make_md_sample(n);
-        group.bench_with_input(BenchmarkId::new("markdown_chars_512", n), &md_sample, |b, text| {
-            let chk = MarkdownChunker::new(RecursiveConfig {
-                metric: SizeMetric::Chars,
-                max_size: 512,
-                min_size: 0,
-                overlap: 0,
-            })
-            .unwrap();
-            b.iter(|| chk.chunk(text, &ChunkHint::none()).unwrap());
-        });
-
-        let rs_sample = make_rs_sample(n);
-        group.bench_with_input(BenchmarkId::new("code_rust_chars_512", n), &rs_sample, |b, text| {
-            let chk = CodeChunker::new(
-                Language::Rust,
-                RecursiveConfig {
+        group.bench_with_input(
+            BenchmarkId::new("markdown_chars_512", n),
+            &md_sample,
+            |b, text| {
+                let chk = MarkdownChunker::new(RecursiveConfig {
                     metric: SizeMetric::Chars,
                     max_size: 512,
                     min_size: 0,
                     overlap: 0,
-                },
-            )
-            .unwrap();
-            b.iter(|| chk.chunk(text, &ChunkHint::none()).unwrap());
-        });
+                })
+                .unwrap();
+                b.iter(|| chk.chunk(text, &ChunkHint::none()).unwrap());
+            },
+        );
+
+        let rs_sample = make_rs_sample(n);
+        group.bench_with_input(
+            BenchmarkId::new("code_rust_chars_512", n),
+            &rs_sample,
+            |b, text| {
+                let chk = CodeChunker::new(
+                    Language::Rust,
+                    RecursiveConfig {
+                        metric: SizeMetric::Chars,
+                        max_size: 512,
+                        min_size: 0,
+                        overlap: 0,
+                    },
+                )
+                .unwrap();
+                b.iter(|| chk.chunk(text, &ChunkHint::none()).unwrap());
+            },
+        );
     }
     group.finish();
 }

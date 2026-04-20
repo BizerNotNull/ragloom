@@ -1,10 +1,14 @@
 use ragloom::transform::chunker::{
-    code::Language, recursive::RecursiveConfig, size::SizeMetric,
-    ChunkHint, Chunker, CodeChunker,
+    ChunkHint, Chunker, CodeChunker, code::Language, recursive::RecursiveConfig, size::SizeMetric,
 };
 
 fn cfg() -> RecursiveConfig {
-    RecursiveConfig { metric: SizeMetric::Chars, max_size: 1000, min_size: 0, overlap: 0 }
+    RecursiveConfig {
+        metric: SizeMetric::Chars,
+        max_size: 1000,
+        min_size: 0,
+        overlap: 0,
+    }
 }
 
 fn check(lang: Language, path: &str, expected_lang: &str) {
@@ -24,9 +28,31 @@ fn check(lang: Language, path: &str, expected_lang: &str) {
     );
 }
 
-#[test] fn go_fixture()    { check(Language::Go,    "tests/fixtures/code/hello.go", "lang=go"); }
-#[test] fn java_fixture()  { check(Language::Java,  "tests/fixtures/code/Hello.java", "lang=java"); }
-#[test] fn c_fixture()     { check(Language::C,     "tests/fixtures/code/hello.c", "lang=c"); }
-#[test] fn cpp_fixture()   { check(Language::Cpp,   "tests/fixtures/code/hello.cpp", "lang=cpp"); }
-#[test] fn ruby_fixture()  { check(Language::Ruby,  "tests/fixtures/code/hello.rb", "lang=ruby"); }
-#[test] fn bash_fixture()  { check(Language::Bash,  "tests/fixtures/code/hello.sh", "lang=bash"); }
+#[test]
+fn go_fixture() {
+    check(Language::Go, "tests/fixtures/code/hello.go", "lang=go");
+}
+#[test]
+fn java_fixture() {
+    check(
+        Language::Java,
+        "tests/fixtures/code/Hello.java",
+        "lang=java",
+    );
+}
+#[test]
+fn c_fixture() {
+    check(Language::C, "tests/fixtures/code/hello.c", "lang=c");
+}
+#[test]
+fn cpp_fixture() {
+    check(Language::Cpp, "tests/fixtures/code/hello.cpp", "lang=cpp");
+}
+#[test]
+fn ruby_fixture() {
+    check(Language::Ruby, "tests/fixtures/code/hello.rb", "lang=ruby");
+}
+#[test]
+fn bash_fixture() {
+    check(Language::Bash, "tests/fixtures/code/hello.sh", "lang=bash");
+}

@@ -153,7 +153,11 @@ mod tests {
             .chunks
             .iter()
             .any(|c| c.text.contains("```rust") && c.text.contains("fn main"));
-        assert!(has_fence, "code block should be in a single chunk: {:?}", doc.chunks);
+        assert!(
+            has_fence,
+            "code block should be in a single chunk: {:?}",
+            doc.chunks
+        );
     }
 
     #[test]
