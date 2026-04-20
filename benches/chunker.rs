@@ -7,13 +7,13 @@
 //! document sizes for future regression tracking.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-#[allow(deprecated)]
-use ragloom::transform::chunker::{ChunkerConfig, chunk_document};
 use ragloom::transform::chunker::{
     Chunker,
     recursive::{RecursiveChunker, RecursiveConfig},
     size::SizeMetric,
 };
+#[allow(deprecated)]
+use ragloom::transform::chunker::{ChunkerConfig, chunk_document};
 
 fn sample(size: usize) -> String {
     let base = "The quick brown fox jumps over the lazy dog. ";
@@ -22,7 +22,7 @@ fn sample(size: usize) -> String {
     while s.len() < size {
         s.push_str(base);
         i += 1;
-        if i % 5 == 0 {
+        if i.is_multiple_of(5) {
             s.push_str("\n\n");
         }
     }
@@ -46,16 +46,20 @@ fn bench(c: &mut Criterion) {
             });
         });
 
-        group.bench_with_input(BenchmarkId::new("recursive_chars_512", n), &text, |b, text| {
-            let chk = RecursiveChunker::new(RecursiveConfig {
-                metric: SizeMetric::Chars,
-                max_size: 512,
-                min_size: 0,
-                overlap: 0,
-            })
-            .unwrap();
-            b.iter(|| chk.chunk(text).unwrap());
-        });
+        group.bench_with_input(
+            BenchmarkId::new("recursive_chars_512", n),
+            &text,
+            |b, text| {
+                let chk = RecursiveChunker::new(RecursiveConfig {
+                    metric: SizeMetric::Chars,
+                    max_size: 512,
+                    min_size: 0,
+                    overlap: 0,
+                })
+                .unwrap();
+                b.iter(|| chk.chunk(text).unwrap());
+            },
+        );
     }
     group.finish();
 }

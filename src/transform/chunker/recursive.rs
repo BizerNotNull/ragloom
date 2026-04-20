@@ -9,12 +9,11 @@
 use std::sync::Arc;
 
 use super::engine::{
-    forced_boundary, normalize_newlines, scan_boundaries, Boundary,
-    BoundaryKind as EngBoundaryKind,
+    Boundary, BoundaryKind as EngBoundaryKind, forced_boundary, normalize_newlines, scan_boundaries,
 };
 use super::error::{ChunkError, ChunkResult};
 use super::fingerprint::StrategyFingerprint;
-use super::size::{counter_for, SizeMetric, TokenCounter};
+use super::size::{SizeMetric, TokenCounter, counter_for};
 use super::{Chunk, ChunkedDocument, Chunker};
 
 fn map_kind(k: EngBoundaryKind) -> super::BoundaryKind {
@@ -111,11 +110,8 @@ impl Chunker for RecursiveChunker {
                 self.counter.as_ref(),
             );
 
-            let candidates = scan_boundaries(
-                &normalized,
-                cursor_byte,
-                window_end_byte - cursor_byte,
-            );
+            let candidates =
+                scan_boundaries(&normalized, cursor_byte, window_end_byte - cursor_byte);
 
             let chosen = choose_boundary(
                 &normalized,
@@ -348,17 +344,30 @@ mod tests {
 
     #[test]
     fn boundary_preference_prefers_paragraph_over_line() {
-        let cfg = RecursiveConfig { max_size: 8, min_size: 0, overlap: 0, metric: SizeMetric::Chars };
+        let cfg = RecursiveConfig {
+            max_size: 8,
+            min_size: 0,
+            overlap: 0,
+            metric: SizeMetric::Chars,
+        };
         let c = RecursiveChunker::new(cfg).unwrap();
         let doc = c.chunk("aaaa\n\nbbbb cccc\ndddd").unwrap();
         assert!(doc.chunks.len() >= 2);
         assert_eq!(doc.chunks[0].text, "aaaa");
-        assert_eq!(doc.chunks[0].boundary, super::super::BoundaryKind::Paragraph);
+        assert_eq!(
+            doc.chunks[0].boundary,
+            super::super::BoundaryKind::Paragraph
+        );
     }
 
     #[test]
     fn overlap_retreats_cursor() {
-        let cfg = RecursiveConfig { max_size: 5, min_size: 0, overlap: 2, metric: SizeMetric::Chars };
+        let cfg = RecursiveConfig {
+            max_size: 5,
+            min_size: 0,
+            overlap: 2,
+            metric: SizeMetric::Chars,
+        };
         let c = RecursiveChunker::new(cfg).unwrap();
         let doc = c.chunk("abcdefghij").unwrap();
         let texts: Vec<&str> = doc.chunks.iter().map(|c| c.text.as_str()).collect();
@@ -375,9 +384,19 @@ mod tests {
 
     #[test]
     fn invalid_config_is_rejected() {
-        let bad = RecursiveConfig { metric: SizeMetric::Chars, max_size: 10, min_size: 11, overlap: 0 };
+        let bad = RecursiveConfig {
+            metric: SizeMetric::Chars,
+            max_size: 10,
+            min_size: 11,
+            overlap: 0,
+        };
         assert!(RecursiveChunker::new(bad).is_err());
-        let bad2 = RecursiveConfig { metric: SizeMetric::Chars, max_size: 10, min_size: 0, overlap: 10 };
+        let bad2 = RecursiveConfig {
+            metric: SizeMetric::Chars,
+            max_size: 10,
+            min_size: 0,
+            overlap: 10,
+        };
         assert!(RecursiveChunker::new(bad2).is_err());
     }
 }

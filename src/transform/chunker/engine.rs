@@ -31,11 +31,7 @@ pub enum BoundaryKind {
 /// annotated with its matching kind. The result is sorted by ascending
 /// `end_byte`. Every offset is guaranteed to lie on a UTF-8 character
 /// boundary.
-pub fn scan_boundaries(
-    text: &str,
-    start_byte: usize,
-    max_window_bytes: usize,
-) -> Vec<Boundary> {
+pub fn scan_boundaries(text: &str, start_byte: usize, max_window_bytes: usize) -> Vec<Boundary> {
     let bytes = text.as_bytes();
     debug_assert!(start_byte <= bytes.len());
     let window_end = (start_byte + max_window_bytes).min(bytes.len());

@@ -49,9 +49,7 @@ static CL100K_BPE: OnceLock<Arc<tiktoken_rs::CoreBPE>> = OnceLock::new();
 impl TiktokenCounter {
     pub fn cl100k_base() -> ChunkResult<Self> {
         let bpe = CL100K_BPE
-            .get_or_init(|| {
-                Arc::new(tiktoken_rs::cl100k_base().expect("cl100k_base is built in"))
-            })
+            .get_or_init(|| Arc::new(tiktoken_rs::cl100k_base().expect("cl100k_base is built in")))
             .clone();
         Ok(Self { bpe })
     }
