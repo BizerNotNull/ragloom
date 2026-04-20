@@ -5,12 +5,16 @@
 //! boundary bugs on arbitrary UTF-8 inputs.
 
 use proptest::prelude::*;
+use ragloom::transform::chunker::semantic::{
+    signal::SemanticError, SemanticChunker, SemanticSignalProvider,
+};
 use ragloom::transform::chunker::{
     ChunkHint, Chunker, CodeChunker, MarkdownChunker,
     code::Language,
     recursive::{RecursiveChunker, RecursiveConfig},
     size::SizeMetric,
 };
+use std::sync::Arc;
 
 fn chunker(max: usize) -> RecursiveChunker {
     RecursiveChunker::new(RecursiveConfig {
@@ -136,6 +140,39 @@ proptest! {
     ) {
         let doc = rust_chunker(max).chunk(&text, &ChunkHint::none()).unwrap();
         prop_assert!(doc.strategy_fingerprint.as_str().contains("lang=rust"));
+        for ch in doc.chunks {
+            prop_assert!(ch.char_len <= max);
+        }
+    }
+}
+
+struct ConstantSignal;
+impl SemanticSignalProvider for ConstantSignal {
+    fn embed(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>, SemanticError> {
+        Ok(inputs.iter().map(|_| vec![1.0_f32, 0.0]).collect())
+    }
+    fn fingerprint(&self) -> &str { "const:proptest" }
+}
+
+fn semantic_chunker(max: usize) -> SemanticChunker {
+    SemanticChunker::new(
+        Arc::new(ConstantSignal),
+        RecursiveConfig { metric: SizeMetric::Chars, max_size: max, min_size: 0, overlap: 0 },
+        95,
+    ).unwrap()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 48, .. ProptestConfig::default() })]
+
+    #[test]
+    fn semantic_never_panics_on_arbitrary_text(
+        text in ".{0,512}",
+        max in 16usize..128,
+    ) {
+        let c = semantic_chunker(max);
+        let doc = c.chunk(&text, &ChunkHint::none()).unwrap();
+        prop_assert!(doc.strategy_fingerprint.as_str().starts_with("semantic:v1"));
         for ch in doc.chunks {
             prop_assert!(ch.char_len <= max);
         }
