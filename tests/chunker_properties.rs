@@ -6,9 +6,9 @@
 
 use proptest::prelude::*;
 use ragloom::transform::chunker::{
+    Chunker,
     recursive::{RecursiveChunker, RecursiveConfig},
     size::SizeMetric,
-    Chunker,
 };
 
 fn chunker(max: usize) -> RecursiveChunker {

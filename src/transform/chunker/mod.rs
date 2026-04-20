@@ -6,22 +6,22 @@
 //! [`StrategyFingerprint`] that is mixed into point IDs to keep determinism
 //! safe across future strategy evolutions.
 
+mod engine;
 mod error;
 mod fingerprint;
-pub mod size;
-mod engine;
-pub mod recursive;
 mod legacy;
 mod public_types;
+pub mod recursive;
+pub mod size;
 
 pub use error::{ChunkError, ChunkResult};
 pub use fingerprint::StrategyFingerprint;
 pub use public_types::{BoundaryKind, Chunk, ChunkedDocument};
-pub use size::{CharCounter, SizeMetric, TiktokenCounter, TokenCounter};
 pub use recursive::RecursiveChunker;
+pub use size::{CharCounter, SizeMetric, TiktokenCounter, TokenCounter};
 
 #[allow(deprecated)]
-pub use legacy::{chunk_document, chunk_text, ChunkerConfig, ChunkingStrategy};
+pub use legacy::{ChunkerConfig, ChunkingStrategy, chunk_document, chunk_text};
 
 /// Abstract chunker.
 pub trait Chunker: Send + Sync {

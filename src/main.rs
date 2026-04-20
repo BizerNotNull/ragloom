@@ -185,10 +185,11 @@ pub fn parse_args(args: &[String]) -> Result<RunConfig, RagloomError> {
     match chunker_strategy.as_str() {
         "recursive" | "legacy" => {}
         other => {
-            return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput)
-                .with_context(format!(
+            return Err(
+                RagloomError::from_kind(RagloomErrorKind::InvalidInput).with_context(format!(
                     "invalid --chunker-strategy: {other} (expected: recursive|legacy)"
-                )));
+                )),
+            );
         }
     }
 
@@ -196,10 +197,11 @@ pub fn parse_args(args: &[String]) -> Result<RunConfig, RagloomError> {
     match size_metric.as_str() {
         "chars" | "tokens" => {}
         other => {
-            return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput)
-                .with_context(format!(
+            return Err(
+                RagloomError::from_kind(RagloomErrorKind::InvalidInput).with_context(format!(
                     "invalid --size-metric: {other} (expected: chars|tokens)"
-                )));
+                )),
+            );
         }
     }
 
@@ -237,10 +239,11 @@ pub fn parse_args(args: &[String]) -> Result<RunConfig, RagloomError> {
     match tokenizer.as_str() {
         "tiktoken-cl100k" => {}
         other => {
-            return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput)
-                .with_context(format!(
+            return Err(
+                RagloomError::from_kind(RagloomErrorKind::InvalidInput).with_context(format!(
                     "invalid --tokenizer: {other} (expected: tiktoken-cl100k)"
-                )));
+                )),
+            );
         }
     }
 

@@ -6,10 +6,12 @@
 //! through the new recursive implementation so we don't maintain two
 //! algorithms.
 
+#![allow(deprecated)]
+
+use super::Chunker;
 use super::public_types::{BoundaryKind, Chunk, ChunkedDocument};
 use super::recursive::{RecursiveChunker, RecursiveConfig};
 use super::size::SizeMetric;
-use super::Chunker;
 
 /// Chunker configuration (deprecated shim).
 ///
@@ -76,7 +78,8 @@ pub fn chunk_document(text: &str, cfg: &ChunkerConfig) -> ChunkedDocument {
         Ok(r) => r,
         Err(_) => return ChunkedDocument { chunks: Vec::new() },
     };
-    rec.chunk(text).unwrap_or(ChunkedDocument { chunks: Vec::new() })
+    rec.chunk(text)
+        .unwrap_or(ChunkedDocument { chunks: Vec::new() })
 }
 
 /// Splits `text` into chunks using a simple character budget (deprecated shim).

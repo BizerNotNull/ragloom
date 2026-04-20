@@ -6,16 +6,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use ragloom::RagloomError;
 use ragloom::doc::DocumentLoader;
 use ragloom::embed::EmbeddingProvider;
 use ragloom::ids::FileFingerprint;
 use ragloom::sink::{Sink, VectorPoint};
 use ragloom::transform::chunker::{
+    Chunker,
     recursive::{RecursiveChunker, RecursiveConfig},
     size::SizeMetric,
-    Chunker,
 };
-use ragloom::RagloomError;
 
 fn build_chunker(max: usize) -> Arc<dyn Chunker> {
     Arc::new(
