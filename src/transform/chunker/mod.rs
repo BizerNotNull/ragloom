@@ -25,7 +25,10 @@ pub use markdown::MarkdownChunker;
 pub use public_types::{BoundaryKind, Chunk, ChunkedDocument};
 pub use recursive::RecursiveChunker;
 pub use router::{ChunkerRouter, default_router};
-pub use semantic::{EmbeddingProviderAdapter, SemanticError, SemanticSignalProvider};
+pub use semantic::{
+    EmbeddingProviderAdapter, SemanticChunker, SemanticConfig, SemanticError,
+    SemanticSignalProvider,
+};
 #[cfg(feature = "fastembed")]
 pub use semantic::FastembedSignalProvider;
 pub use size::{CharCounter, SizeMetric, TiktokenCounter, TokenCounter};
