@@ -8,9 +8,9 @@
 
 mod error;
 mod fingerprint;
-mod size;
+pub mod size;
 mod engine;
-mod recursive;
+pub mod recursive;
 mod legacy;
 mod public_types;
 
