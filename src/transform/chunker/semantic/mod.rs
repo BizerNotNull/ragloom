@@ -190,8 +190,9 @@ impl Chunker for SemanticChunker {
         let groups = merge_for_min_size(
             groups,
             &sentence_list,
+            text,
             self.config.min_size,
-            self.config.metric,
+            self.counter.as_ref(),
         );
 
         let mut chunks: Vec<Chunk> = Vec::new();
@@ -296,15 +297,16 @@ fn build_groups(sentences: &[Sentence<'_>], splits: &[usize]) -> Vec<(usize, usi
 fn merge_for_min_size(
     groups: Vec<(usize, usize)>,
     sentences: &[Sentence<'_>],
+    text: &str,
     min_size: usize,
-    metric: SizeMetric,
+    counter: &dyn crate::transform::chunker::size::TokenCounter,
 ) -> Vec<(usize, usize)> {
     if min_size == 0 {
         return groups;
     }
     let mut merged: Vec<(usize, usize)> = Vec::new();
     for g in groups {
-        let size = group_size(g, sentences, metric);
+        let size = group_size(g, sentences, text, counter);
         if size < min_size
             && let Some(prev) = merged.last_mut()
         {
@@ -316,12 +318,15 @@ fn merge_for_min_size(
     merged
 }
 
-fn group_size(g: (usize, usize), sentences: &[Sentence<'_>], metric: SizeMetric) -> usize {
-    let _ = metric; // chars metric only for now
-    sentences
-        .get(g.0..=g.1)
-        .map(|ss| ss.iter().map(|s| s.text.chars().count()).sum::<usize>())
-        .unwrap_or(0)
+fn group_size(
+    g: (usize, usize),
+    sentences: &[Sentence<'_>],
+    text: &str,
+    counter: &dyn crate::transform::chunker::size::TokenCounter,
+) -> usize {
+    let start = sentences[g.0].start_byte;
+    let end = sentences[g.1].end_byte;
+    counter.count(&text[start..end])
 }
 
 #[cfg(test)]

@@ -280,6 +280,16 @@ pub fn parse_args(args: &[String]) -> Result<RunConfig, RagloomError> {
             .with_context("--chunker-mode=single requires --chunker-single"));
     }
 
+    if enable_semantic
+        && chunker_mode == "single"
+        && chunker_single.as_deref() != Some("semantic")
+    {
+        return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput).with_context(
+            "--enable-semantic is only honored with --chunker-mode=router or \
+             --chunker-mode=single with --chunker-single=semantic",
+        ));
+    }
+
     let semantic_provider = semantic_provider.unwrap_or_else(|| "adapter".to_string());
     match semantic_provider.as_str() {
         "adapter" => {}
@@ -671,5 +681,31 @@ mod tests {
                 semantic_percentile: 95,
             }
         );
+    }
+
+    #[test]
+    fn enable_semantic_errors_in_single_mode_without_semantic() {
+        let args = vec![
+            "ragloom".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--embed-url".to_string(),
+            "http://embed".to_string(),
+            "--embed-model".to_string(),
+            "default".to_string(),
+            "--qdrant-url".to_string(),
+            "http://qdrant".to_string(),
+            "--collection".to_string(),
+            "docs".to_string(),
+            "--chunker-mode".to_string(),
+            "single".to_string(),
+            "--chunker-single".to_string(),
+            "recursive".to_string(),
+            "--enable-semantic".to_string(),
+        ];
+        let err = parse_args(&args).expect_err("must reject");
+        assert!(err.to_string().contains("--enable-semantic"));
     }
 }
