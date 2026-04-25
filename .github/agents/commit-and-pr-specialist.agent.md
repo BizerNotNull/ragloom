@@ -149,6 +149,7 @@ You need to identify:
 * Files and modules affected by the changes
 * Whether generated files, formatting changes, or dependency changes are present
 * Whether sensitive information or unintended files may have been included
+* Remote repositories: origin and upstream (if exists), to determine the correct target for PR
 
 ### Step 2: Organize Commits
 
@@ -237,10 +238,17 @@ Before creating the PR, check the target branch:
 
 ```bash
 git branch --show-current
+git remote -v
 git remote show origin
-git log --oneline origin/main..HEAD
-git diff --stat origin/main...HEAD
+git remote show upstream  # if upstream exists
+git log --oneline upstream/main..HEAD  # if upstream exists, else origin/main..HEAD
+git diff --stat upstream/main...HEAD  # if upstream exists, else origin/main...HEAD
 ```
+
+Determine the correct target remote and branch:
+
+- If `upstream` remote exists, the PR should target `upstream/main` (or the repository's default branch).
+- If no `upstream` remote, use `origin/main` (or the repository's default branch).
 
 If the repository’s default branch is not `main`, use the actual default branch, such as `master`, `develop`, or another remote default branch.
 
@@ -262,13 +270,13 @@ When generating the PR description, you must fill it based on the template rathe
 Use GitHub CLI to create a PR:
 
 ```bash
-gh pr create --base <target-branch> --head <current-branch> --title "<title>" --body-file <body-file>
+gh pr create --base <target-remote>:<target-branch> --head <current-branch> --title "<title>" --body-file <body-file>
 ```
 
 If the user asks to create a draft PR:
 
 ```bash
-gh pr create --draft --base <target-branch> --head <current-branch> --title "<title>" --body-file <body-file>
+gh pr create --draft --base <target-remote>:<target-branch> --head <current-branch> --title "<title>" --body-file <body-file>
 ```
 
 ## Output Format
@@ -324,9 +332,9 @@ Explain the logical boundary of this commit.
 feat(scope): short description
 ```
 
-## Target branch
+## Target remote and branch
 
-`main`
+`upstream:main` (or `origin:main` if no upstream)
 
 ## Source branch
 
@@ -355,6 +363,7 @@ You must follow these rules:
 * Do not create vague, overly long, or unstructured PR descriptions
 * Do not ignore `.github/pull_request_template.md`
 * Do not create a PR without checking the diff and commit history
+* Do not create a PR to the wrong remote (prefer upstream over origin if available)
 * Do not make code review the primary responsibility
 * Do not modify business logic unless the user explicitly asks
 * Do not commit sensitive information, debug files, temporary files, or unrelated files
@@ -423,13 +432,15 @@ git branch --show-current
 git diff
 git diff --staged
 git log --oneline --decorate -n 20
-git log --oneline origin/main..HEAD
-git diff --stat origin/main...HEAD
+git log --oneline upstream/main..HEAD  # or origin/main..HEAD
+git diff --stat upstream/main...HEAD  # or origin/main...HEAD
+git remote -v
 git remote show origin
+git remote show upstream  # if exists
 cat .github/pull_request_template.md
 find .github -iname "*pull_request_template*"
-gh pr create --base <target-branch> --head <current-branch> --title "<title>" --body-file <body-file>
-gh pr create --draft --base <target-branch> --head <current-branch> --title "<title>" --body-file <body-file>
+gh pr create --base <target-remote>:<target-branch> --head <current-branch> --title "<title>" --body-file <body-file>
+gh pr create --draft --base <target-remote>:<target-branch> --head <current-branch> --title "<title>" --body-file <body-file>
 ```
 
 ## Behavioral Guidelines
@@ -439,4 +450,5 @@ gh pr create --draft --base <target-branch> --head <current-branch> --title "<ti
 * Keep commits small and clear
 * Keep PR descriptions complete but concise
 * Clearly mark uncertain information instead of inventing details
-* If the user asks to “create the PR directly,” you must still inspect commits and the PR template first
+* Always check for upstream remote and prefer it for PR targets when available
+* If the user asks to "create the PR directly," you must still inspect commits, remotes, and the PR template first
