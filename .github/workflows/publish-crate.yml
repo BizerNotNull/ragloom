@@ -41,6 +41,11 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
 

@@ -8,24 +8,52 @@ fn read_repo_file(path: &str) -> String {
 
 #[test]
 fn release_workflow_supports_version_dispatch_and_release_notes() {
-    let workflow = read_repo_file(".github/workflows/release.yml");
+    let workflow_yaml = read_repo_file(".github/workflows/release.yml");
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(&workflow_yaml).expect("release workflow is valid YAML");
+
+    let on = workflow
+        .get("on")
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("expected release workflow to define an `on` mapping");
+
+    let workflow_dispatch = on
+        .get(serde_yaml::Value::String("workflow_dispatch".to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("expected release workflow to support manual `workflow_dispatch`");
+
+    let inputs = workflow_dispatch
+        .get(serde_yaml::Value::String("inputs".to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("expected `workflow_dispatch` to define `inputs`");
+
+    let version_input = inputs
+        .get(serde_yaml::Value::String("version".to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("expected `workflow_dispatch.inputs` to define a `version` input");
 
     assert!(
-        workflow.contains("workflow_dispatch:"),
-        "expected release workflow to support manual dispatch"
+        version_input
+            .get(serde_yaml::Value::String("required".to_string()))
+            .and_then(serde_yaml::Value::as_bool)
+            .unwrap_or(false),
+        "expected `workflow_dispatch.inputs.version.required` to be true"
     );
     assert!(
-        workflow.contains("version:"),
-        "expected release workflow to declare a version input"
+        matches!(
+            version_input.get(serde_yaml::Value::String("type".to_string())),
+            Some(serde_yaml::Value::String(kind)) if kind == "string"
+        ),
+        "expected `workflow_dispatch.inputs.version.type` to be `string`"
     );
     assert!(
-        workflow.contains("generate_release_notes: true"),
+        workflow_yaml.contains("generate_release_notes: true"),
         "expected release workflow to generate release notes deterministically"
     );
 }
 
 #[test]
-fn release_workflows_verify_tag_and_crate_version_consistency() {
+fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
     let release_workflow = read_repo_file(".github/workflows/release.yml");
     let publish_workflow = read_repo_file(".github/workflows/publish-crate.yml");
 
@@ -36,6 +64,22 @@ fn release_workflows_verify_tag_and_crate_version_consistency() {
     assert!(
         publish_workflow.contains("verify-release-version"),
         "expected publish workflow to verify crate and tag versions before cargo publish"
+    );
+    assert!(
+        release_workflow.contains("actions/setup-python@v5"),
+        "expected release workflow to pin Python for the verification script"
+    );
+    assert!(
+        release_workflow.contains("python-version: \"3.11\""),
+        "expected release workflow to require Python 3.11 for tomllib"
+    );
+    assert!(
+        publish_workflow.contains("actions/setup-python@v5"),
+        "expected publish workflow to pin Python for the verification script"
+    );
+    assert!(
+        publish_workflow.contains("python-version: \"3.11\""),
+        "expected publish workflow to require Python 3.11 for tomllib"
     );
 }
 
