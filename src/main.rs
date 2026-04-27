@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use ragloom::config::PipelineConfig;
 use ragloom::doc::FsUtf8Loader;
 use ragloom::embed::http_client::{HttpEmbeddingClient, HttpEmbeddingConfig};
 use ragloom::error::{RagloomError, RagloomErrorKind};
@@ -64,6 +65,7 @@ pub enum EmbedBackend {
 /// Using `std::env::args` keeps the binary dependency-free while still allowing
 /// deterministic unit tests for argument handling.
 pub fn parse_args(args: &[String]) -> Result<RunConfig, RagloomError> {
+    let mut config_path: Option<String> = None;
     let mut dir: Option<String> = None;
     let mut embed_backend: Option<String> = None;
 
@@ -103,6 +105,7 @@ pub fn parse_args(args: &[String]) -> Result<RunConfig, RagloomError> {
         };
 
         match flag {
+            "--config" => config_path = next_value(),
             "--dir" => dir = next_value(),
 
             "--embed-backend" => embed_backend = next_value(),
@@ -132,7 +135,7 @@ pub fn parse_args(args: &[String]) -> Result<RunConfig, RagloomError> {
             "--semantic-percentile" => semantic_percentile = next_value(),
             "--help" | "-h" => {
                 return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput).with_context(
-                    "usage: ragloom --dir <path> --qdrant-url <url> --collection <name> [--embed-backend <openai|http>]",
+                    "usage: ragloom [--config <path>] --dir <path> --qdrant-url <url> --collection <name> [--embed-backend <openai|http>]",
                 ));
             }
             unknown => {
@@ -142,19 +145,30 @@ pub fn parse_args(args: &[String]) -> Result<RunConfig, RagloomError> {
         }
     }
 
-    let dir = dir.ok_or_else(|| {
-        RagloomError::from_kind(RagloomErrorKind::Config)
-            .with_context("missing required flag: --dir")
-    })?;
+    let file_config = config_path
+        .as_deref()
+        .map(load_pipeline_config)
+        .transpose()?;
 
-    let qdrant_url = qdrant_url.ok_or_else(|| {
-        RagloomError::from_kind(RagloomErrorKind::Config)
-            .with_context("missing required flag: --qdrant-url")
-    })?;
-    let collection = collection.ok_or_else(|| {
-        RagloomError::from_kind(RagloomErrorKind::Config)
-            .with_context("missing required flag: --collection")
-    })?;
+    let dir = dir
+        .or_else(|| file_config.as_ref().map(|c| c.source.root.clone()))
+        .ok_or_else(|| {
+            RagloomError::from_kind(RagloomErrorKind::Config)
+                .with_context("missing required value: --dir or source.root in --config")
+        })?;
+
+    let qdrant_url = qdrant_url
+        .or_else(|| file_config.as_ref().map(|c| c.sink.qdrant_url.clone()))
+        .ok_or_else(|| {
+            RagloomError::from_kind(RagloomErrorKind::Config)
+                .with_context("missing required value: --qdrant-url or sink.qdrant_url in --config")
+        })?;
+    let collection = collection
+        .or_else(|| file_config.as_ref().map(|c| c.sink.collection.clone()))
+        .ok_or_else(|| {
+            RagloomError::from_kind(RagloomErrorKind::Config)
+                .with_context("missing required value: --collection or sink.collection in --config")
+        })?;
 
     let backend = embed_backend.unwrap_or_else(|| "openai".to_string());
 
@@ -169,6 +183,7 @@ pub fn parse_args(args: &[String]) -> Result<RunConfig, RagloomError> {
     let embed_backend = match backend.as_str() {
         "openai" => {
             let endpoint = openai_endpoint
+                .or_else(|| file_config.as_ref().map(|c| c.embed.endpoint.clone()))
                 .unwrap_or_else(|| "https://api.openai.com/v1/embeddings".to_string());
             let api_key = openai_api_key.ok_or_else(|| {
                 RagloomError::from_kind(RagloomErrorKind::Config)
@@ -182,10 +197,13 @@ pub fn parse_args(args: &[String]) -> Result<RunConfig, RagloomError> {
             }
         }
         "http" => {
-            let url = embed_url.ok_or_else(|| {
-                RagloomError::from_kind(RagloomErrorKind::Config)
-                    .with_context("missing required flag for http backend: --embed-url")
-            })?;
+            let url = embed_url
+                .or_else(|| file_config.as_ref().map(|c| c.embed.endpoint.clone()))
+                .ok_or_else(|| {
+                    RagloomError::from_kind(RagloomErrorKind::Config).with_context(
+                        "missing required value for http backend: --embed-url or embed.endpoint in --config",
+                    )
+                })?;
             let model = embed_model.unwrap_or_else(|| "default".to_string());
             EmbedBackend::Http { url, model }
         }
@@ -346,6 +364,21 @@ pub fn parse_args(args: &[String]) -> Result<RunConfig, RagloomError> {
         semantic_provider,
         semantic_percentile,
     })
+}
+
+fn load_pipeline_config(path: &str) -> Result<PipelineConfig, RagloomError> {
+    let yaml = std::fs::read_to_string(path).map_err(|e| {
+        RagloomError::new(RagloomErrorKind::Io, e)
+            .with_context(format!("failed to read config file: {path}"))
+    })?;
+
+    let cfg = PipelineConfig::from_yaml_str(&yaml)
+        .map_err(|e| e.with_context(format!("failed to parse config file: {path}")))?;
+
+    cfg.validate()
+        .map_err(|e| e.with_context(format!("invalid config file: {path}")))?;
+
+    Ok(cfg)
 }
 
 fn parse_code_lang(s: &str) -> Result<ragloom::transform::chunker::code::Language, RagloomError> {
@@ -610,13 +643,15 @@ async fn try_main() -> Result<(), RagloomError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn parse_args_returns_error_when_required_flags_missing() {
         let args = vec!["ragloom".to_string()];
         let err = parse_args(&args).expect_err("expected error");
         assert_eq!(err.kind, RagloomErrorKind::Config);
-        assert!(err.to_string().contains("missing required flag"));
+        assert!(err.to_string().contains("missing required value"));
     }
 
     #[test]
@@ -707,5 +742,100 @@ mod tests {
         ];
         let err = parse_args(&args).expect_err("must reject");
         assert!(err.to_string().contains("--enable-semantic"));
+    }
+
+    #[test]
+    fn parse_args_loads_required_values_from_yaml_config() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  root: "/tmp/from-config"
+embed:
+  endpoint: "http://embed-from-config"
+sink:
+  qdrant_url: "http://qdrant-from-config"
+  collection: "from-config"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+        ];
+
+        let cfg = parse_args(&args).expect("config");
+        assert_eq!(cfg.dir, "/tmp/from-config");
+        assert_eq!(cfg.qdrant_url, "http://qdrant-from-config");
+        assert_eq!(cfg.collection, "from-config");
+        assert_eq!(
+            cfg.embed_backend,
+            EmbedBackend::Http {
+                url: "http://embed-from-config".to_string(),
+                model: "default".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_surfaces_yaml_validation_context() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  root: ""
+embed:
+  endpoint: "http://embed"
+sink:
+  qdrant_url: "http://qdrant"
+  collection: "docs"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("should fail validation");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(err.to_string().contains("invalid config file"));
+    }
+
+    #[test]
+    fn parse_args_surfaces_yaml_parse_context() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  root: "/tmp/docs"
+embed:
+  endpoint "missing-colon"
+sink:
+  qdrant_url: "http://qdrant"
+  collection: "docs"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("should fail parse");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(err.to_string().contains("failed to parse config file"));
     }
 }
