@@ -38,7 +38,7 @@ Manual `push` of a `v*` tag is still supported, but it goes through the same
 steps run.
 
 GitHub Release notes are generated automatically by the release workflow so the
-published notes come from the repository event history rather than ad-hoc local
+published notes come from the repository event history rather than ad hoc local
 release text.
 
 ## Support Scope
