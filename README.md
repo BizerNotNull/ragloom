@@ -187,6 +187,26 @@ ragloom \
 	--collection docs
 ```
 
+Run with a YAML config file (typed `PipelineConfig`) plus backend-specific CLI flags:
+
+```yaml
+# ragloom.yaml
+source:
+  root: "./docs"
+embed:
+  endpoint: "http://localhost:8080/embed"
+sink:
+  qdrant_url: "http://localhost:6333"
+  collection: "docs"
+```
+
+```bash
+ragloom \
+	--config ./ragloom.yaml \
+	--embed-backend http \
+	--embed-model default
+```
+
 On Windows PowerShell, the same command looks like this:
 
 ```powershell
@@ -207,19 +227,27 @@ The process runs until interrupted with Ctrl+C.
 - `--qdrant-url <url>`: Qdrant base URL
 - `--collection <name>`: Qdrant collection name
 
+Use `--config <path>` to load a YAML file and satisfy these required values via:
+
+- `source.root`
+- `sink.qdrant_url`
+- `sink.collection`
+
+CLI flags override values loaded from `--config`.
+
 ### Embedding backend selection
 
 `--embed-backend` defaults to `openai`.
 
 OpenAI backend options:
 
-- `--openai-endpoint <url>`: defaults to `https://api.openai.com/v1/embeddings`
+- `--openai-endpoint <url>`: defaults to `https://api.openai.com/v1/embeddings` (or `embed.endpoint` from `--config` when present)
 - `--openai-api-key <key>`: required when using the OpenAI backend
 - `--openai-model <model>`: defaults to `text-embedding-3-small`
 
 Generic HTTP backend options:
 
-- `--embed-url <url>`: required when `--embed-backend http`
+- `--embed-url <url>`: required when `--embed-backend http` unless `embed.endpoint` is provided by `--config`
 - `--embed-model <model>`: defaults to `default`
 
 Flags support both `--flag value` and `--flag=value` forms.
@@ -349,7 +377,6 @@ cargo llvm-cov --all --lcov --output-path lcov.info
 - File change detection uses path, size, and mtime rather than content hashing.
 - The built-in loader only reads UTF-8 files.
 - The WAL is in memory, so it does not survive process restarts.
-- The binary is currently CLI-driven; the typed YAML config module is present in the library but is not wired into the executable path.
 - There is no built-in collection management, health endpoint, retry queue, or dead-letter handling.
 
 ## Roadmap Ideas
