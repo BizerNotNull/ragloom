@@ -123,7 +123,9 @@ cargo install --path .
 
 ## Configuration
 
-Ragloom supports a small typed YAML config for source and sink wiring.
+Ragloom supports a small typed YAML config for source, embed, and sink wiring.
+
+### Basic configuration
 
 ```yaml
 source:
@@ -143,18 +145,26 @@ Run with:
 ragloom --config ./ragloom.yaml --openai-api-key "$OPENAI_API_KEY"
 ```
 
+### Generic HTTP embedding
+
 For a generic HTTP embedding service:
+
+```yaml
+embed:
+  endpoint: "http://localhost:8080/embed"
+```
 
 ```bash
 ragloom --config ./ragloom.yaml --embed-backend http --embed-model default
 ```
 
-Notes:
+### Configuration notes
 
 - `--config` can provide `source.root`, `embed.endpoint`, `sink.qdrant_url`, and `sink.collection`
 - backend-specific auth still comes from CLI flags, such as `--openai-api-key`
 - chunker settings are currently configured by CLI flags, not by YAML
 - flags support both `--flag value` and `--flag=value`
+- the config file is merged with CLI flags; CLI flags take precedence
 
 ## How is Ragloom different?
 
@@ -338,7 +348,59 @@ Ragloom does not log secrets, API keys, or full document contents.
 
 Ragloom is intentionally small today.
 
-Current limitations:
+## Troubleshooting
+
+### Ragloom fails to start with Qdrant connection error
+
+Make sure Qdrant is running and accessible:
+
+```bash
+curl http://localhost:6333/health
+```
+
+If using Docker, verify the container is running:
+
+```bash
+docker ps | grep qdrant
+```
+
+### Collection not found error
+
+Ragloom does not create collections automatically. Create the collection before running:
+
+```bash
+curl -X PUT http://localhost:6333/collections/docs \
+  -H "Content-Type: application/json" \
+  -d '{"vectors":{"size":1536,"distance":"Cosine"}}'
+```
+
+Adjust the vector size to match your embedding model.
+
+### Empty or missing chunks
+
+Check that your files are:
+- UTF-8 encoded
+- located in the top-level of the configured directory
+- not in subdirectories (recursive scanning is not yet supported)
+
+### OpenAI API errors
+
+Verify your API key is set correctly:
+
+```bash
+echo $OPENAI_API_KEY
+```
+
+Test the embedding endpoint directly:
+
+```bash
+curl https://api.openai.com/v1/embeddings \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"input":"test","model":"text-embedding-3-small"}'
+```
+
+## Current limitations
 
 - only local filesystem input
 - only top-level files in the configured directory
