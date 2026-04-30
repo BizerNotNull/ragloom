@@ -80,8 +80,6 @@ fn scanner_recursively_discovers_nested_files_once() {
             .any(|event| event.fingerprint.canonical_path.ends_with("child.txt"))
     );
 
-    std::thread::sleep(Duration::from_secs(1));
-
     let second = scanner.poll();
     assert_eq!(second.len(), 0);
 }
