@@ -198,7 +198,9 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         })
         .transpose()?;
     if collection_vector_size == Some(0) {
-        return Err(cli_invalid_input("--collection-vector-size must be positive"));
+        return Err(cli_invalid_input(
+            "--collection-vector-size must be positive",
+        ));
     }
 
     let backend = embed_backend.unwrap_or_else(|| "openai".to_string());
