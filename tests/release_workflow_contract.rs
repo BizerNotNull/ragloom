@@ -57,6 +57,7 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
     let release_workflow = read_repo_file(".github/workflows/release.yml");
     let publish_workflow = read_repo_file(".github/workflows/publish-crate.yml");
     let quality_workflow = read_repo_file(".github/workflows/quality-deep.yml");
+    let codeql_workflow = read_repo_file(".github/workflows/codeql.yml");
 
     assert!(
         release_workflow.contains("verify-release-version"),
@@ -83,20 +84,20 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
         "expected publish workflow to require Python 3.11 for tomllib"
     );
     assert!(
-        quality_workflow.contains("security-events: write"),
-        "expected deep quality workflow to request security-events permission"
+        !quality_workflow.contains("cargo +nightly miri"),
+        "expected deep quality workflow to keep Miri out of the release-critical CI path"
     );
     assert!(
-        release_workflow.contains("security-events: write"),
-        "expected release workflow to grant security-events permission to reusable jobs"
+        codeql_workflow.contains("github/codeql-action/init@v4"),
+        "expected repository code scanning to run through CodeQL"
     );
     assert!(
-        quality_workflow.contains("timeout-minutes: 90"),
-        "expected deep quality Miri job to stay bounded in CI"
+        codeql_workflow.contains("languages: rust"),
+        "expected CodeQL workflow to analyze Rust code"
     );
     assert!(
-        quality_workflow.contains("cargo +nightly miri test -p ragloom --lib"),
-        "expected deep quality Miri job to use the bounded crate-level command"
+        codeql_workflow.contains("languages: actions"),
+        "expected CodeQL workflow to analyze GitHub Actions workflows"
     );
 }
 

@@ -14,8 +14,9 @@ Deeper checks used by CI on `main` and release paths:
 
 - `cargo llvm-cov --workspace --all-features`
 - `cargo test --workspace --features loom`
-- `cargo +nightly miri test -p ragloom --lib`
 - `cargo bench`
+
+GitHub-hosted security scanning runs through CodeQL and repository governance workflows rather than Miri.
 
 ## Development Expectations
 
@@ -45,6 +46,6 @@ Focus tests on observable behavior rather than implementation details.
 - Add regression tests for bug fixes that fail before the fix
 - Use `cargo test --workspace --all-targets --all-features` for fast feedback
 - Run `cargo test --workspace --features loom` for concurrency-sensitive code
-- Run `cargo +nightly miri test -p ragloom --lib` for the release-path Miri gate
-- Use `cargo +nightly miri test --workspace` locally when you need a deeper, slower investigation
+- Run `cargo +nightly miri test -p ragloom --lib` locally when investigating unsafe or UB-sensitive behavior
+- Use `cargo +nightly miri test --workspace` only for deeper manual investigations because it is too slow for the release workflow
 - Use `cargo llvm-cov --workspace --all-features` to check coverage

@@ -57,6 +57,8 @@ cargo llvm-cov --workspace --all-features
 cargo bench
 ```
 
+CodeQL handles the repository's GitHub-hosted code scanning path; keep Miri as a local/manual deep check rather than a required release workflow gate.
+
 ### Feature-specific checks
 
 Semantic chunking with local fastembed support is behind the `fastembed` feature:
