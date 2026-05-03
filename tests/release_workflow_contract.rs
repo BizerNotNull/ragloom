@@ -114,7 +114,7 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
 }
 
 #[test]
-fn release_workflow_keeps_macos_best_effort_and_uses_portable_checksums() {
+fn release_workflow_packages_named_assets_and_keeps_macos_best_effort() {
     let workflow_yaml = read_repo_file(".github/workflows/release.yml");
     let workflow: serde_yaml::Value =
         serde_yaml::from_str(&workflow_yaml).expect("release workflow is valid YAML");
@@ -145,11 +145,30 @@ fn release_workflow_keeps_macos_best_effort_and_uses_portable_checksums() {
         serde_yaml::to_string(best_effort).expect("serialize best-effort release job");
     let publish_release_yaml =
         serde_yaml::to_string(publish_release).expect("serialize publish-release job");
+    let publish_best_effort = jobs
+        .get(serde_yaml::Value::String(
+            "publish-best-effort-release-assets".to_string(),
+        ))
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("expected release workflow to define best-effort asset publication");
+    let publish_best_effort_yaml = serde_yaml::to_string(publish_best_effort)
+        .expect("serialize best-effort asset publication job");
 
     assert!(
-        workflow_yaml.contains("command -v sha256sum")
-            && workflow_yaml.contains("shasum -a 256"),
+        workflow_yaml.contains("command -v sha256sum") && workflow_yaml.contains("shasum -a 256"),
         "expected release workflow to use a portable checksum command across Linux and macOS"
+    );
+    assert!(
+        workflow_yaml
+            .contains("ragloom-${{ needs.prepare-release.outputs.tag }}-${{ matrix.target }}")
+            && workflow_yaml.contains("archive_extension: tar.gz")
+            && workflow_yaml.contains("archive_extension: zip"),
+        "expected release workflow to publish target-specific archives instead of raw unnamed binaries"
+    );
+    assert!(
+        workflow_yaml.contains("Compress-Archive")
+            && workflow_yaml.contains("Package Windows release archive"),
+        "expected release workflow to package Windows assets as zip archives"
     );
     assert!(
         supported_job_yaml.contains("x86_64-unknown-linux-gnu")
@@ -171,6 +190,11 @@ fn release_workflow_keeps_macos_best_effort_and_uses_portable_checksums() {
         !publish_release_yaml.contains("release-binaries-best-effort"),
         "expected publish-release to depend only on release-blocking targets"
     );
+    assert!(
+        publish_best_effort_yaml.contains("pattern: release-*-apple-darwin")
+            && publish_best_effort_yaml.contains("softprops/action-gh-release@v2"),
+        "expected successful macOS artifacts to be appended to the GitHub Release after the blocking targets publish"
+    );
 }
 
 #[test]
@@ -188,5 +212,9 @@ fn support_docs_describe_release_dispatch_runbook() {
     assert!(
         support.contains("Best-effort") || support.contains("best-effort"),
         "expected support docs to describe macOS release artifacts as best-effort"
+    );
+    assert!(
+        support.contains("ragloom-v") && support.contains(".tar.gz") && support.contains(".zip"),
+        "expected support docs to describe the published release archive naming convention"
     );
 }

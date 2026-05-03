@@ -107,7 +107,36 @@ Success looks like this:
 
 ## Installation
 
-Prebuilt binaries are not published yet. For now, install from source with Cargo.
+Ragloom publishes GitHub Release binaries for supported platforms:
+
+- `ragloom-v<version>-x86_64-unknown-linux-gnu.tar.gz`
+- `ragloom-v<version>-aarch64-unknown-linux-gnu.tar.gz`
+- `ragloom-v<version>-x86_64-pc-windows-msvc.zip`
+
+Best-effort macOS assets are published with the same naming pattern when those jobs succeed:
+
+- `ragloom-v<version>-x86_64-apple-darwin.tar.gz`
+- `ragloom-v<version>-aarch64-apple-darwin.tar.gz`
+
+Each release also includes a matching `.sha256.txt` checksum file and `.spdx.json` SBOM.
+
+### Install a release binary
+
+Download the archive for your platform from the GitHub Release page, extract it, and run `ragloom` (or `ragloom.exe` on Windows).
+
+Examples:
+
+```bash
+tar -xzf ragloom-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+./ragloom --version
+```
+
+```powershell
+Expand-Archive .\ragloom-v0.1.0-x86_64-pc-windows-msvc.zip -DestinationPath .
+.\ragloom.exe --version
+```
+
+If you prefer or need an unsupported target, install from source with Cargo.
 
 ### Build from source
 

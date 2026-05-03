@@ -42,14 +42,22 @@ GitHub Release notes are generated automatically by the release workflow so the
 published notes come from the repository event history rather than ad hoc local
 release text.
 
-Release checksums are generated with a platform-aware command so Linux targets
-use `sha256sum` while macOS targets use `shasum -a 256`.
+GitHub Release archives are published with explicit target names such as
+`ragloom-v0.1.0-x86_64-unknown-linux-gnu.tar.gz` and
+`ragloom-v0.1.0-x86_64-pc-windows-msvc.zip`.
+
+Each published archive also includes a matching `.sha256.txt` checksum file and
+`.spdx.json` SBOM. Release checksums are generated with a platform-aware
+command so Linux targets use `sha256sum` while macOS targets use `shasum -a 256`.
 
 ## Support Scope
 
 The project treats Linux and Windows release targets as the formal support boundary for CI, release verification, and issue triage priority.
 
 macOS binaries are provided as convenience artifacts. They should compile and publish when practical, but breakage on macOS does not block release unless maintainers explicitly promote it to a supported target.
+
+When a macOS build succeeds, its archive is appended to the existing GitHub
+Release after the supported Linux and Windows assets have already published.
 
 ## Getting Help
 
