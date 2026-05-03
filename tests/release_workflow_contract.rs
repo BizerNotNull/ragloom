@@ -84,6 +84,14 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
         "expected publish workflow to require Python 3.11 for tomllib"
     );
     assert!(
+        publish_workflow.contains("Check whether crate version is already published"),
+        "expected publish workflow to check crates.io before attempting cargo publish"
+    );
+    assert!(
+        publish_workflow.contains("should_publish"),
+        "expected publish workflow to gate cargo publish behind a crates.io version check"
+    );
+    assert!(
         release_workflow.contains("security-events: write"),
         "expected release workflow permissions to include security-events: write for reusable workflow calls"
     );
