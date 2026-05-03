@@ -53,11 +53,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo "release_ref=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "release_ref=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
             echo "create_tag=true" >> "$GITHUB_OUTPUT"
           else
-            echo "release_ref=${GITHUB_REF}" >> "$GITHUB_OUTPUT"
             echo "create_tag=false" >> "$GITHUB_OUTPUT"
           fi
 
