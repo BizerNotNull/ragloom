@@ -32,6 +32,7 @@ The release workflow verifies that:
 - the requested version matches `Cargo.toml` `package.version`
 - any pushed tag matches the same crate version
 - the crate publish workflow re-checks that version/tag pair before `cargo publish`
+- Linux and Windows release targets complete before GitHub Release and crates.io publication continue
 
 Manual `push` of a `v*` tag is still supported, but it goes through the same
 `Cargo.toml` consistency guard before release artifacts or crates.io publish
@@ -40,6 +41,9 @@ steps run.
 GitHub Release notes are generated automatically by the release workflow so the
 published notes come from the repository event history rather than ad hoc local
 release text.
+
+Release checksums are generated with a platform-aware command so Linux targets
+use `sha256sum` while macOS targets use `shasum -a 256`.
 
 ## Support Scope
 

@@ -84,6 +84,10 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
         "expected publish workflow to require Python 3.11 for tomllib"
     );
     assert!(
+        release_workflow.contains("security-events: write"),
+        "expected release workflow permissions to include security-events: write for reusable workflow calls"
+    );
+    assert!(
         !quality_workflow.contains("cargo +nightly miri"),
         "expected deep quality workflow to keep Miri out of the release-critical CI path"
     );
@@ -102,6 +106,66 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
 }
 
 #[test]
+fn release_workflow_keeps_macos_best_effort_and_uses_portable_checksums() {
+    let workflow_yaml = read_repo_file(".github/workflows/release.yml");
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(&workflow_yaml).expect("release workflow is valid YAML");
+
+    let jobs = workflow
+        .get("jobs")
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("expected release workflow to define jobs");
+
+    let release_binaries = jobs
+        .get(serde_yaml::Value::String("release-binaries".to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("expected release workflow to define supported release binaries");
+    let best_effort = jobs
+        .get(serde_yaml::Value::String(
+            "release-binaries-best-effort".to_string(),
+        ))
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("expected release workflow to define best-effort macOS binaries");
+    let publish_release = jobs
+        .get(serde_yaml::Value::String("publish-release".to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("expected release workflow to define publish-release");
+
+    let supported_job_yaml =
+        serde_yaml::to_string(release_binaries).expect("serialize supported release job");
+    let best_effort_yaml =
+        serde_yaml::to_string(best_effort).expect("serialize best-effort release job");
+    let publish_release_yaml =
+        serde_yaml::to_string(publish_release).expect("serialize publish-release job");
+
+    assert!(
+        workflow_yaml.contains("command -v sha256sum")
+            && workflow_yaml.contains("shasum -a 256"),
+        "expected release workflow to use a portable checksum command across Linux and macOS"
+    );
+    assert!(
+        supported_job_yaml.contains("x86_64-unknown-linux-gnu")
+            && supported_job_yaml.contains("aarch64-unknown-linux-gnu")
+            && supported_job_yaml.contains("x86_64-pc-windows-msvc"),
+        "expected supported release job to gate Linux and Windows artifacts"
+    );
+    assert!(
+        !supported_job_yaml.contains("apple-darwin"),
+        "expected supported release job to exclude macOS targets"
+    );
+    assert!(
+        best_effort_yaml.contains("x86_64-apple-darwin")
+            && best_effort_yaml.contains("aarch64-apple-darwin")
+            && best_effort_yaml.contains("continue-on-error: true"),
+        "expected macOS artifacts to remain best-effort and non-blocking"
+    );
+    assert!(
+        !publish_release_yaml.contains("release-binaries-best-effort"),
+        "expected publish-release to depend only on release-blocking targets"
+    );
+}
+
+#[test]
 fn support_docs_describe_release_dispatch_runbook() {
     let support = read_repo_file("SUPPORT.md");
 
@@ -112,5 +176,9 @@ fn support_docs_describe_release_dispatch_runbook() {
     assert!(
         support.contains("Cargo.toml"),
         "expected support docs to document crate-version verification"
+    );
+    assert!(
+        support.contains("Best-effort") || support.contains("best-effort"),
+        "expected support docs to describe macOS release artifacts as best-effort"
     );
 }
