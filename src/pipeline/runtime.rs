@@ -1256,8 +1256,65 @@ mod tests {
         assert!(count <= 50, "poll() called too often while idle: {count}");
     }
 
-    // Removed WAL-related tests: async_runtime_surfaces_startup_wal_read_failure,
-    // runtime_does_not_replan_file_versions_already_in_wal
+    #[tokio::test]
+    async fn async_runtime_surfaces_startup_wal_read_failure() {
+        let wal = std::sync::Arc::new(tokio::sync::Mutex::new(FailingWal));
+        let runtime = Runtime::with_shared_wal(FakeSource::default(), wal);
+        let (mut rx, shutdown) = AsyncRuntime::new(runtime, 1).start();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if shutdown.exit_reason() == Some(RuntimeExitReason::StartupFailed) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("startup failure should be surfaced");
+
+        assert!(
+            rx.recv().await.is_none(),
+            "queue should close after startup failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_does_not_replan_file_versions_already_in_wal() {
+        let wal = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::state::wal::InMemoryWal::new(),
+        ));
+        let fingerprint = crate::ids::FileFingerprint {
+            canonical_path: "/x/a.txt".to_string(),
+            size_bytes: 10,
+            mtime_unix_secs: 100,
+        };
+        {
+            let mut guard = wal.lock().await;
+            guard
+                .append(WalRecord::WorkItemV2 {
+                    fingerprint: fingerprint.clone(),
+                })
+                .expect("append work");
+            guard
+                .append(WalRecord::SinkAckV2 {
+                    fingerprint: fingerprint.clone(),
+                })
+                .expect("append ack");
+        }
+
+        let mut source = FakeSource::default();
+        source.pending.push(FileVersionDiscovered {
+            file_version_id: crate::ids::file_version_id(&fingerprint),
+            fingerprint,
+        });
+        let mut runtime = Runtime::with_shared_wal(source, std::sync::Arc::clone(&wal));
+
+        runtime.tick().expect("tick");
+
+        let records = wal.lock().await.read_all().expect("read");
+        assert_eq!(records.len(), 2);
+    }
 
     #[tokio::test]
     async fn worker_processes_work_items_from_queue() {
