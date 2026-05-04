@@ -337,85 +337,11 @@ struct QdrantResponse {
 mod tests {
     use super::*;
 
-    use std::collections::VecDeque;
-    use std::io::{Read, Write};
-    use std::net::{Shutdown, TcpListener};
-    use std::sync::{Arc, Mutex};
-
     use crate::sink::{PointId, VectorPoint};
-
-    #[derive(Debug, Clone)]
-    struct TestResponse {
-        status: u16,
-        reason: &'static str,
-        body: &'static str,
-    }
-
-    impl TestResponse {
-        fn json(status: u16, body: &'static str) -> Self {
-            let reason = match status {
-                200 => "OK",
-                404 => "Not Found",
-                409 => "Conflict",
-                500 => "Internal Server Error",
-                _ => "Test Response",
-            };
-
-            Self {
-                status,
-                reason,
-                body,
-            }
-        }
-    }
+    use crate::test_support::{TestHttpResponse, spawn_scripted_http_server};
 
     fn spawn_test_server(status: u16, body: &'static str) -> String {
-        let (base_url, _) = spawn_sequence_test_server(vec![TestResponse::json(status, body)]);
-        base_url
-    }
-
-    fn spawn_sequence_test_server(
-        responses: Vec<TestResponse>,
-    ) -> (String, Arc<Mutex<Vec<String>>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let thread_responses = Arc::clone(&responses);
-        let thread_requests = Arc::clone(&requests);
-
-        std::thread::spawn(move || {
-            while let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 8192];
-                let bytes_read = stream.read(&mut buf).expect("read request");
-                thread_requests
-                    .lock()
-                    .expect("requests lock")
-                    .push(String::from_utf8_lossy(&buf[..bytes_read]).into_owned());
-
-                let response = thread_responses
-                    .lock()
-                    .expect("responses lock")
-                    .pop_front()
-                    .expect("response");
-                let response = format!(
-                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    response.status,
-                    response.reason,
-                    response.body.len(),
-                    response.body
-                );
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
-                let _ = stream.shutdown(Shutdown::Both);
-
-                if thread_responses.lock().expect("responses lock").is_empty() {
-                    break;
-                }
-            }
-        });
-
-        (format!("http://{addr}"), requests)
+        spawn_scripted_http_server(vec![TestHttpResponse::json(status, body)]).base_url()
     }
 
     fn test_point() -> VectorPoint {
@@ -472,8 +398,9 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
     #[tokio::test]
     async fn delete_document_points_sends_doc_id_filter() {
-        let (base_url, requests) =
-            spawn_sequence_test_server(vec![TestResponse::json(200, r#"{"status":"ok"}"#)]);
+        let server =
+            spawn_scripted_http_server(vec![TestHttpResponse::json(200, r#"{"status":"ok"}"#)]);
+        let base_url = server.base_url();
 
         let sink = QdrantSink::new(QdrantConfig {
             base_url,
@@ -489,7 +416,7 @@ mod tests {
         .await
         .expect("delete");
 
-        let requests = requests.lock().expect("requests lock");
+        let requests = server.join();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].starts_with("POST /collections/docs/points/delete?wait=true HTTP/1.1"));
         assert!(requests[0].contains(r#""key":"doc_id""#));
@@ -520,8 +447,9 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
     #[tokio::test]
     async fn ensure_collection_exists_noops_when_collection_already_exists() {
-        let (base_url, requests) =
-            spawn_sequence_test_server(vec![TestResponse::json(200, r#"{"status":"ok"}"#)]);
+        let server =
+            spawn_scripted_http_server(vec![TestHttpResponse::json(200, r#"{"status":"ok"}"#)]);
+        let base_url = server.base_url();
 
         let sink = QdrantSink::new(QdrantConfig {
             base_url,
@@ -532,7 +460,7 @@ mod tests {
 
         sink.ensure_collection_exists(384).await.expect("ok");
 
-        let requests = requests.lock().expect("requests lock");
+        let requests = server.join();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].starts_with("GET /collections/docs HTTP/1.1"));
     }
@@ -540,10 +468,11 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
     #[tokio::test]
     async fn ensure_collection_exists_creates_missing_collection() {
-        let (base_url, requests) = spawn_sequence_test_server(vec![
-            TestResponse::json(404, r#"{"status":"error"}"#),
-            TestResponse::json(200, r#"{"status":"ok"}"#),
+        let server = spawn_scripted_http_server(vec![
+            TestHttpResponse::json(404, r#"{"status":"error"}"#),
+            TestHttpResponse::json(200, r#"{"status":"ok"}"#),
         ]);
+        let base_url = server.base_url();
 
         let sink = QdrantSink::new(QdrantConfig {
             base_url,
@@ -554,7 +483,7 @@ mod tests {
 
         sink.ensure_collection_exists(384).await.expect("created");
 
-        let requests = requests.lock().expect("requests lock");
+        let requests = server.join();
         assert_eq!(requests.len(), 2);
         assert!(requests[0].starts_with("GET /collections/docs HTTP/1.1"));
         assert!(requests[1].starts_with("PUT /collections/docs HTTP/1.1"));
@@ -565,11 +494,12 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
     #[tokio::test]
     async fn ensure_collection_exists_tolerates_create_race_when_collection_now_exists() {
-        let (base_url, requests) = spawn_sequence_test_server(vec![
-            TestResponse::json(404, r#"{"status":"error"}"#),
-            TestResponse::json(409, r#"{"status":"error","result":{"code":"conflict"}}"#),
-            TestResponse::json(200, r#"{"status":"ok"}"#),
+        let server = spawn_scripted_http_server(vec![
+            TestHttpResponse::json(404, r#"{"status":"error"}"#),
+            TestHttpResponse::json(409, r#"{"status":"error","result":{"code":"conflict"}}"#),
+            TestHttpResponse::json(200, r#"{"status":"ok"}"#),
         ]);
+        let base_url = server.base_url();
 
         let sink = QdrantSink::new(QdrantConfig {
             base_url,
@@ -580,7 +510,7 @@ mod tests {
 
         sink.ensure_collection_exists(384).await.expect("ok");
 
-        let requests = requests.lock().expect("requests lock");
+        let requests = server.join();
         assert_eq!(requests.len(), 3);
         assert!(requests[0].starts_with("GET /collections/docs HTTP/1.1"));
         assert!(requests[1].starts_with("PUT /collections/docs HTTP/1.1"));
@@ -590,10 +520,11 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
     #[tokio::test]
     async fn ensure_collection_exists_surfaces_create_failures_with_bootstrap_context() {
-        let (base_url, _) = spawn_sequence_test_server(vec![
-            TestResponse::json(404, r#"{"status":"error"}"#),
-            TestResponse::json(500, r#"{"status":"error"}"#),
+        let server = spawn_scripted_http_server(vec![
+            TestHttpResponse::json(404, r#"{"status":"error"}"#),
+            TestHttpResponse::json(500, r#"{"status":"error"}"#),
         ]);
+        let base_url = server.base_url();
 
         let sink = QdrantSink::new(QdrantConfig {
             base_url,

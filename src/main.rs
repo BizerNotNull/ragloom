@@ -20,6 +20,9 @@ use ragloom::pipeline::runtime::{
 use ragloom::sink::qdrant::{QdrantConfig, QdrantSink};
 use ragloom::source::dir_scanner::DirectoryScannerSource;
 
+#[cfg(test)]
+mod test_support;
+
 /// Runtime configuration constructed from CLI arguments.
 ///
 /// # Why
@@ -926,102 +929,17 @@ fn mark_health_from_runtime_exit(health: &HealthState, reason: RuntimeExitReason
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
     use std::io::Write;
     use std::net::TcpListener;
     use std::sync::mpsc;
     use std::sync::mpsc::Sender;
-    use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
 
-    #[derive(Debug, Clone)]
-    struct TestResponse {
-        status: u16,
-        reason: &'static str,
-        body: &'static str,
-    }
+    use crate::test_support::{TestHttpResponse, spawn_scripted_http_server};
 
     struct RequestCounterServer {
         stop: Sender<()>,
         handle: std::thread::JoinHandle<usize>,
-    }
-
-    fn spawn_qdrant_bootstrap_server(
-        responses: Vec<TestResponse>,
-    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
-
-        let handle = std::thread::spawn(move || {
-            let mut requests = Vec::new();
-
-            loop {
-                let response = {
-                    let mut guard = responses.lock().expect("lock");
-                    guard.pop_front()
-                };
-
-                let Some(response) = response else {
-                    break;
-                };
-
-                let (mut stream, _) = listener.accept().expect("accept");
-                let mut buf = [0_u8; 8192];
-                let mut request = Vec::new();
-
-                loop {
-                    let read = std::io::Read::read(&mut stream, &mut buf).expect("read");
-                    if read == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buf[..read]);
-                    if request.windows(4).any(|w| w == b"\r\n\r\n") {
-                        let header_end = request
-                            .windows(4)
-                            .position(|w| w == b"\r\n\r\n")
-                            .expect("header end")
-                            + 4;
-                        let headers = String::from_utf8_lossy(&request[..header_end]);
-                        let content_length = headers
-                            .lines()
-                            .find_map(|line| {
-                                let (name, value) = line.split_once(':')?;
-                                if name.eq_ignore_ascii_case("content-length") {
-                                    value.trim().parse::<usize>().ok()
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or(0);
-                        while request.len() < header_end + content_length {
-                            let read =
-                                std::io::Read::read(&mut stream, &mut buf).expect("read body");
-                            if read == 0 {
-                                break;
-                            }
-                            request.extend_from_slice(&buf[..read]);
-                        }
-                        break;
-                    }
-                }
-
-                requests.push(String::from_utf8_lossy(&request).into_owned());
-                write!(
-                    stream,
-                    "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
-                    response.status,
-                    response.reason,
-                    response.body.len(),
-                    response.body
-                )
-                .expect("write response");
-            }
-
-            requests
-        });
-
-        (format!("http://{}", addr), handle)
     }
 
     fn spawn_qdrant_request_counter_server() -> (String, RequestCounterServer) {
@@ -1686,18 +1604,11 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
     #[tokio::test]
     async fn bootstrap_collection_if_needed_infers_known_openai_model_size_in_startup_path() {
-        let (base_url, server) = spawn_qdrant_bootstrap_server(vec![
-            TestResponse {
-                status: 404,
-                reason: "Not Found",
-                body: r#"{"status":"not_found"}"#,
-            },
-            TestResponse {
-                status: 200,
-                reason: "OK",
-                body: r#"{"status":"ok"}"#,
-            },
+        let server = spawn_scripted_http_server(vec![
+            TestHttpResponse::json(404, r#"{"status":"not_found"}"#),
+            TestHttpResponse::json(200, r#"{"status":"ok"}"#),
         ]);
+        let base_url = server.base_url();
 
         let cfg = RunConfig {
             dir: "/tmp/docs".to_string(),
@@ -1740,7 +1651,7 @@ mod tests {
             .await
             .expect("bootstrap");
 
-        let requests = server.join().expect("join");
+        let requests = server.join();
         assert_eq!(requests.len(), 2);
         assert!(requests[1].starts_with("PUT /collections/docs HTTP/1.1"));
         assert!(requests[1].contains(r#""size":1536"#));
@@ -1749,18 +1660,11 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
     #[tokio::test]
     async fn bootstrap_collection_if_needed_uses_explicit_http_vector_size_in_startup_path() {
-        let (base_url, server) = spawn_qdrant_bootstrap_server(vec![
-            TestResponse {
-                status: 404,
-                reason: "Not Found",
-                body: r#"{"status":"not_found"}"#,
-            },
-            TestResponse {
-                status: 200,
-                reason: "OK",
-                body: r#"{"status":"ok"}"#,
-            },
+        let server = spawn_scripted_http_server(vec![
+            TestHttpResponse::json(404, r#"{"status":"not_found"}"#),
+            TestHttpResponse::json(200, r#"{"status":"ok"}"#),
         ]);
+        let base_url = server.base_url();
 
         let cfg = RunConfig {
             dir: "/tmp/docs".to_string(),
@@ -1802,7 +1706,7 @@ mod tests {
             .await
             .expect("bootstrap");
 
-        let requests = server.join().expect("join");
+        let requests = server.join();
         assert_eq!(requests.len(), 2);
         assert!(requests[1].starts_with("PUT /collections/docs HTTP/1.1"));
         assert!(requests[1].contains(r#""size":768"#));
