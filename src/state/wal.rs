@@ -42,6 +42,12 @@ pub enum WalRecord {
     SinkAckV2 {
         fingerprint: crate::ids::FileFingerprint,
     },
+
+    /// A document delete has been enqueued for sink synchronization.
+    DeleteDocument { canonical_path: String },
+
+    /// A document delete has been successfully applied to the sink.
+    DeleteAck { canonical_path: String },
 }
 
 /// Minimal WAL storage contract.
@@ -227,8 +233,9 @@ impl WalStore for FileWal {
 pub fn unacked_work_items(records: &[WalRecord]) -> Vec<WalRecord> {
     let mut acked_chunks = std::collections::HashSet::<[u8; 32]>::new();
     let mut acked_files = std::collections::HashSet::<crate::ids::FileFingerprint>::new();
+    let mut pending_deletes = std::collections::HashMap::<String, (usize, WalRecord)>::new();
 
-    for record in records {
+    for (idx, record) in records.iter().enumerate() {
         match record {
             WalRecord::SinkAck { chunk_id } => {
                 acked_chunks.insert(*chunk_id);
@@ -236,22 +243,32 @@ pub fn unacked_work_items(records: &[WalRecord]) -> Vec<WalRecord> {
             WalRecord::SinkAckV2 { fingerprint } => {
                 acked_files.insert(fingerprint.clone());
             }
+            WalRecord::DeleteDocument { canonical_path } => {
+                pending_deletes.insert(canonical_path.clone(), (idx, record.clone()));
+            }
+            WalRecord::DeleteAck { canonical_path } => {
+                pending_deletes.remove(canonical_path);
+            }
             WalRecord::WorkItem { .. } | WalRecord::WorkItemV2 { .. } => {}
         }
     }
 
-    records
+    let mut unacked = records
         .iter()
-        .filter_map(|record| match record {
+        .enumerate()
+        .filter_map(|(idx, record)| match record {
             WalRecord::WorkItem { chunk_id } if !acked_chunks.contains(chunk_id) => {
-                Some(record.clone())
+                Some((idx, record.clone()))
             }
             WalRecord::WorkItemV2 { fingerprint } if !acked_files.contains(fingerprint) => {
-                Some(record.clone())
+                Some((idx, record.clone()))
             }
             _ => None,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    unacked.extend(pending_deletes.into_values());
+    unacked.sort_by_key(|(idx, _)| *idx);
+    unacked.into_iter().map(|(_, record)| record).collect()
 }
 
 #[cfg(test)]
@@ -395,6 +412,50 @@ mod tests {
         assert_eq!(
             unacked_work_items(&records),
             vec![WalRecord::WorkItemV2 { fingerprint: b }]
+        );
+    }
+
+    #[test]
+    fn unacked_work_items_filters_acknowledged_deletes() {
+        let records = vec![
+            WalRecord::DeleteDocument {
+                canonical_path: "/x/a.txt".to_string(),
+            },
+            WalRecord::DeleteDocument {
+                canonical_path: "/x/b.txt".to_string(),
+            },
+            WalRecord::DeleteAck {
+                canonical_path: "/x/a.txt".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            unacked_work_items(&records),
+            vec![WalRecord::DeleteDocument {
+                canonical_path: "/x/b.txt".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn unacked_work_items_keeps_later_delete_after_prior_delete_ack() {
+        let records = vec![
+            WalRecord::DeleteDocument {
+                canonical_path: "/x/a.txt".to_string(),
+            },
+            WalRecord::DeleteAck {
+                canonical_path: "/x/a.txt".to_string(),
+            },
+            WalRecord::DeleteDocument {
+                canonical_path: "/x/a.txt".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            unacked_work_items(&records),
+            vec![WalRecord::DeleteDocument {
+                canonical_path: "/x/a.txt".to_string()
+            }]
         );
     }
 

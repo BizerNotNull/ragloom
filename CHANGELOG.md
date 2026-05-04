@@ -8,6 +8,10 @@
 - Startup replay for unacknowledged `WorkItemV2` records, with acknowledged file
   versions seeded into planner de-duplication to avoid re-emitting completed
   work after restart.
+- Delete synchronization for previously observed source files: completed scans
+  emit explicit delete events, the WAL stores separate delete work/ack records,
+  and the Qdrant sink deletes all points matching the document's stable
+  `doc_id`.
 - Bounded in-process retry queue for transient loader I/O, embedding, and sink
   failures, configurable with `retry.*` YAML keys or `--retry-*` CLI flags.
 
@@ -15,6 +19,9 @@
 - The WAL format is append-only newline-delimited JSON. Corrupt or unreadable
   state files fail startup with a `state` error so operators can inspect or
   replace the file intentionally.
+- Delete synchronization only covers files Ragloom has already observed under
+  the configured source root. It is idempotent and does not manage whole Qdrant
+  collections.
 - Retries are deterministic and jitter-free. Configuration and invalid-input
   errors are not retried, and exhausted retries are counted in
   `ragloom.ingest.summary` failures.

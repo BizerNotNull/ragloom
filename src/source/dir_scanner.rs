@@ -6,10 +6,11 @@
 //! periodically enumerating a directory tree and translating file metadata
 //! into stable file-version discovery events.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::source::file_tailer::{FileTailer, ObservedFileMeta};
-use crate::source::{FileVersionDiscovered, Source};
+use crate::source::{Source, SourceEvent};
 
 /// A polling source that scans a root directory tree for files.
 ///
@@ -37,6 +38,7 @@ impl DirectoryScannerSource {
     }
 
     fn observe_root_once(&mut self) {
+        let mut observed_paths = HashSet::new();
         walk_regular_files(&self.root, |path| {
             let meta = match std::fs::metadata(&path) {
                 Ok(meta) => meta,
@@ -59,12 +61,15 @@ impl DirectoryScannerSource {
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
 
+            let canonical_path = path.to_string_lossy().to_string();
+            observed_paths.insert(canonical_path.clone());
             self.tailer.observe(ObservedFileMeta {
-                canonical_path: path.to_string_lossy().to_string(),
+                canonical_path,
                 size_bytes,
                 mtime_unix_secs,
             });
         });
+        self.tailer.complete_scan(&observed_paths);
     }
 }
 
@@ -129,7 +134,7 @@ fn walk_regular_files_inner(root: &Path, visit: &mut dyn FnMut(PathBuf)) {
 }
 
 impl Source for DirectoryScannerSource {
-    fn poll(&mut self) -> Vec<FileVersionDiscovered> {
+    fn poll(&mut self) -> Vec<SourceEvent> {
         self.observe_root_once();
         self.tailer.drain()
     }

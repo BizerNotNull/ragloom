@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
-use ragloom::source::{DirectoryScannerSource, Source};
+use ragloom::source::{DirectoryScannerSource, Source, SourceEvent};
 use tempfile::tempdir;
 
 #[test]
@@ -19,7 +19,7 @@ fn scanner_emits_event_for_new_file() {
 
     let events = scanner.poll();
     assert_eq!(events.len(), 1);
-    assert!(events[0].fingerprint.canonical_path.ends_with("a.txt"));
+    assert!(canonical_path(&events[0]).ends_with("a.txt"));
 }
 
 #[test]
@@ -72,12 +72,12 @@ fn scanner_recursively_discovers_nested_files_once() {
     assert!(
         first
             .iter()
-            .any(|event| event.fingerprint.canonical_path.ends_with("root.txt"))
+            .any(|event| canonical_path(event).ends_with("root.txt"))
     );
     assert!(
         first
             .iter()
-            .any(|event| event.fingerprint.canonical_path.ends_with("child.txt"))
+            .any(|event| canonical_path(event).ends_with("child.txt"))
     );
 
     let second = scanner.poll();
@@ -101,13 +101,36 @@ fn scanner_skips_directory_symlinks() {
 
     let events = scanner.poll();
     assert_eq!(events.len(), 1);
-    assert!(events[0].fingerprint.canonical_path.ends_with("inside.txt"));
-    assert!(
-        !events[0]
-            .fingerprint
-            .canonical_path
-            .contains(link_dir.to_string_lossy().as_ref())
+    assert!(canonical_path(&events[0]).ends_with("inside.txt"));
+    assert!(!canonical_path(&events[0]).contains(link_dir.to_string_lossy().as_ref()));
+}
+
+#[test]
+fn scanner_emits_delete_event_for_previously_seen_missing_file() {
+    let tmp = tempdir().expect("create tempdir");
+    let path = tmp.path().join("a.txt");
+    write_text_file(&path, "hello");
+
+    let mut scanner = DirectoryScannerSource::new(tmp.path()).expect("create scanner");
+    assert_eq!(scanner.poll().len(), 1);
+
+    fs::remove_file(&path).expect("delete file");
+
+    let events = scanner.poll();
+    assert_eq!(
+        events,
+        vec![SourceEvent::FileDeleted {
+            canonical_path: path.to_string_lossy().to_string()
+        }]
     );
+    assert!(scanner.poll().is_empty());
+}
+
+fn canonical_path(event: &SourceEvent) -> &str {
+    match event {
+        SourceEvent::FileVersionDiscovered(discovered) => &discovered.fingerprint.canonical_path,
+        SourceEvent::FileDeleted { canonical_path } => canonical_path,
+    }
 }
 
 fn write_text_file(path: &Path, contents: &str) {
