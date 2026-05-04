@@ -9,6 +9,8 @@ use serde::Deserialize;
 
 use crate::error::{RagloomError, RagloomErrorKind};
 
+pub const DEFAULT_STATE_PATH: &str = ".ragloom/wal.ndjson";
+
 /// Top-level pipeline configuration.
 ///
 /// # Why
@@ -79,7 +81,7 @@ impl Default for RetryConfig {
 }
 
 fn default_state_path() -> String {
-    ".ragloom/wal.ndjson".to_string()
+    DEFAULT_STATE_PATH.to_string()
 }
 
 fn default_retry_max_attempts() -> u32 {

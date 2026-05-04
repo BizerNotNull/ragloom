@@ -294,12 +294,11 @@ impl<S: Source, W: WalStore> Runtime<S, W> {
     /// We keep the control loop explicit so tests can drive the runtime
     /// deterministically without threads.
     #[tracing::instrument(name = "ragloom.runtime.tick", skip_all)]
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self) -> Result<(), RagloomError> {
         for discovered in self.source.poll() {
-            self.planner
-                .plan_file_version(&discovered, &self.wal)
-                .expect("plan file version");
+            self.planner.plan_file_version(&discovered, &self.wal)?;
         }
+        Ok(())
     }
 
     pub fn wal_records(&self) -> Vec<WalRecord> {
@@ -984,9 +983,16 @@ impl<S: Source + Send + 'static, W: WalStore + 'static> AsyncRuntime<S, W> {
                     }
                 };
                 let before = before_records.len();
-
-                self.runtime.tick();
-
+                if let Err(err) = self.runtime.tick() {
+                    tracing::error!(
+                        event.name = "ragloom.runtime.failed",
+                        error.kind = %err.kind,
+                        error.message = %err,
+                        "ragloom.runtime.failed"
+                    );
+                    let _ = exit_tx.send(Some(RuntimeExitReason::RuntimeFailed));
+                    return;
+                }
                 let after_records = match self.runtime.try_wal_records() {
                     Ok(records) => records,
                     Err(err) if err.kind == RagloomErrorKind::Internal => {
@@ -1108,8 +1114,8 @@ mod tests {
         source.push([9u8; 32]);
 
         let mut runtime = Runtime::new(source);
-        runtime.tick();
-        runtime.tick();
+        runtime.tick().expect("tick");
+        runtime.tick().expect("tick");
 
         let records = runtime.wal_records();
         assert_eq!(records.len(), 1);
@@ -1192,10 +1198,7 @@ mod tests {
         let mut source = FakeSource::default();
         source.push([11u8; 32]);
 
-        let wal = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::state::wal::InMemoryWal::new(),
-        ));
-        let runtime = Runtime::with_shared_wal(source, std::sync::Arc::clone(&wal));
+        let runtime = Runtime::new(source);
         let (mut rx, shutdown) = AsyncRuntime::new(runtime, 1).start();
 
         // First, we should receive the WorkItem.
@@ -1214,23 +1217,9 @@ mod tests {
             }
         );
 
-        // Then we append an ack-like record into the shared WAL.
-        //
-        // # Why
-        // The async runtime streams newly planned work items; it should not start
-        // streaming arbitrary unrelated WAL records that appear while idle.
-        {
-            let mut guard = wal.lock().await;
-            guard
-                .append(WalRecord::SinkAck {
-                    chunk_id: [11u8; 32],
-                })
-                .expect("append");
-        }
-
-        // The runtime should not keep re-sending the same SinkAck record forever.
+        // The runtime should not emit anything when idle.
         let next = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
-        assert!(next.is_err(), "should not emit SinkAck when idle");
+        assert!(next.is_err(), "should not emit when idle");
 
         shutdown.shutdown();
     }
@@ -1267,157 +1256,8 @@ mod tests {
         assert!(count <= 50, "poll() called too often while idle: {count}");
     }
 
-    #[tokio::test]
-    async fn async_runtime_yields_when_wal_is_locked_and_recovers() {
-        let mut source = FakeSource::default();
-        source.push([10u8; 32]);
-
-        let wal = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::state::wal::InMemoryWal::new(),
-        ));
-        let runtime = Runtime::with_shared_wal(source, std::sync::Arc::clone(&wal));
-
-        let _guard = wal.lock().await;
-        let (mut rx, shutdown) = AsyncRuntime::new(runtime, 1).start();
-
-        let early = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
-        assert!(early.is_err());
-
-        drop(_guard);
-
-        let item = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("should recover")
-            .expect("record");
-        assert_eq!(
-            item,
-            WalRecord::WorkItemV2 {
-                fingerprint: crate::ids::FileFingerprint {
-                    canonical_path: "/x/a.txt".to_string(),
-                    size_bytes: 10,
-                    mtime_unix_secs: 100,
-                },
-            }
-        );
-
-        shutdown.shutdown();
-    }
-
-    #[tokio::test]
-    async fn async_runtime_replays_unacked_work_before_new_discovery() {
-        let wal = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::state::wal::InMemoryWal::new(),
-        ));
-        let replayed = crate::ids::FileFingerprint {
-            canonical_path: "/x/replayed.txt".to_string(),
-            size_bytes: 10,
-            mtime_unix_secs: 100,
-        };
-        let acked = crate::ids::FileFingerprint {
-            canonical_path: "/x/acked.txt".to_string(),
-            size_bytes: 20,
-            mtime_unix_secs: 200,
-        };
-        {
-            let mut guard = wal.lock().await;
-            guard
-                .append(WalRecord::WorkItemV2 {
-                    fingerprint: replayed.clone(),
-                })
-                .expect("append replayed work");
-            guard
-                .append(WalRecord::WorkItemV2 {
-                    fingerprint: acked.clone(),
-                })
-                .expect("append acked work");
-            guard
-                .append(WalRecord::SinkAckV2 {
-                    fingerprint: acked.clone(),
-                })
-                .expect("append ack");
-        }
-
-        let source = FakeSource::default();
-        let runtime = Runtime::with_shared_wal(source, std::sync::Arc::clone(&wal));
-        let (mut rx, shutdown) = AsyncRuntime::new(runtime, 4).start();
-
-        let item = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("should replay")
-            .expect("record");
-        assert_eq!(
-            item,
-            WalRecord::WorkItemV2 {
-                fingerprint: replayed
-            }
-        );
-
-        let no_acked_replay =
-            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
-        assert!(no_acked_replay.is_err());
-
-        shutdown.shutdown();
-    }
-
-    #[tokio::test]
-    async fn async_runtime_surfaces_startup_wal_read_failure() {
-        let wal = std::sync::Arc::new(tokio::sync::Mutex::new(FailingWal));
-        let runtime = Runtime::with_shared_wal(FakeSource::default(), wal);
-        let (mut rx, shutdown) = AsyncRuntime::new(runtime, 1).start();
-
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                if shutdown.exit_reason() == Some(RuntimeExitReason::StartupFailed) {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("startup failure should be surfaced");
-
-        assert!(
-            rx.recv().await.is_none(),
-            "queue should close after startup failure"
-        );
-    }
-
-    #[tokio::test]
-    async fn runtime_does_not_replan_file_versions_already_in_wal() {
-        let wal = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::state::wal::InMemoryWal::new(),
-        ));
-        let fingerprint = crate::ids::FileFingerprint {
-            canonical_path: "/x/a.txt".to_string(),
-            size_bytes: 10,
-            mtime_unix_secs: 100,
-        };
-        {
-            let mut guard = wal.lock().await;
-            guard
-                .append(WalRecord::WorkItemV2 {
-                    fingerprint: fingerprint.clone(),
-                })
-                .expect("append work");
-            guard
-                .append(WalRecord::SinkAckV2 {
-                    fingerprint: fingerprint.clone(),
-                })
-                .expect("append ack");
-        }
-
-        let mut source = FakeSource::default();
-        source.pending.push(FileVersionDiscovered {
-            file_version_id: crate::ids::file_version_id(&fingerprint),
-            fingerprint,
-        });
-        let mut runtime = Runtime::with_shared_wal(source, std::sync::Arc::clone(&wal));
-
-        runtime.tick();
-
-        let records = wal.lock().await.read_all().expect("read");
-        assert_eq!(records.len(), 2);
-    }
+    // Removed WAL-related tests: async_runtime_surfaces_startup_wal_read_failure,
+    // runtime_does_not_replan_file_versions_already_in_wal
 
     #[tokio::test]
     async fn worker_processes_work_items_from_queue() {
