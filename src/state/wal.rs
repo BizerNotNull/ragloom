@@ -5,7 +5,7 @@
 //! us replay un-acked work after crashes without requiring complex distributed
 //! coordination.
 
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::{RagloomError, RagloomErrorKind};
@@ -160,6 +160,8 @@ impl WalStore for FileWal {
                 .with_context("failed to encode WAL record")
         })?;
 
+        // Keep append durability simple and explicit: one record, one sync.
+        // This favors crash recovery over throughput for the current local WAL.
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -205,9 +207,19 @@ impl WalStore for FileWal {
     }
 
     fn is_empty(&self) -> bool {
-        std::fs::metadata(&self.path)
-            .map(|metadata| metadata.len() == 0)
-            .unwrap_or(false)
+        match std::fs::metadata(&self.path) {
+            Ok(metadata) => metadata.len() == 0,
+            Err(err) if err.kind() == ErrorKind::NotFound => true,
+            Err(err) => {
+                tracing::warn!(
+                    event.name = "ragloom.wal.metadata_failed",
+                    path = %self.path.display(),
+                    error.message = %err,
+                    "ragloom.wal.metadata_failed"
+                );
+                false
+            }
+        }
     }
 }
 
@@ -409,5 +421,15 @@ mod tests {
         file.write_all(b"{not json}\n")
             .expect("write invalid content");
         assert!(!wal.is_empty());
+    }
+
+    #[test]
+    fn file_wal_reports_missing_file_as_empty() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let wal = FileWal {
+            path: dir.path().join("missing.ndjson"),
+        };
+
+        assert!(wal.is_empty());
     }
 }
