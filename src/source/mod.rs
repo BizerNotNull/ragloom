@@ -25,11 +25,23 @@ pub struct FileVersionDiscovered {
     pub file_version_id: [u8; 32],
 }
 
+/// A source event emitted after a completed scan.
+///
+/// # Why
+/// File-version discovery and file deletion have different downstream effects.
+/// Keeping them explicit prevents delete synchronization from being treated as
+/// a failed ingest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceEvent {
+    FileVersionDiscovered(FileVersionDiscovered),
+    FileDeleted { canonical_path: String },
+}
+
 /// A generic source of file-version discovery events.
 ///
 /// # Why
 /// This trait keeps the pipeline open for new sources (S3/Notion/etc.) while
 /// enabling deterministic tests by providing a simple pull-based interface.
 pub trait Source {
-    fn poll(&mut self) -> Vec<FileVersionDiscovered>;
+    fn poll(&mut self) -> Vec<SourceEvent>;
 }

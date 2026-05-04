@@ -293,10 +293,19 @@ impl<S: Source, W: WalStore> Runtime<S, W> {
     /// deterministically without threads.
     #[tracing::instrument(name = "ragloom.runtime.tick", skip_all)]
     pub fn tick(&mut self) {
-        for discovered in self.source.poll() {
-            self.planner
-                .plan_file_version(&discovered, &self.wal)
-                .expect("plan file version");
+        for event in self.source.poll() {
+            match event {
+                crate::source::SourceEvent::FileVersionDiscovered(discovered) => {
+                    self.planner
+                        .plan_file_version(&discovered, &self.wal)
+                        .expect("plan file version");
+                }
+                crate::source::SourceEvent::FileDeleted { canonical_path } => {
+                    self.planner
+                        .plan_file_delete(&canonical_path, &self.wal)
+                        .expect("plan file delete");
+                }
+            }
         }
     }
 
@@ -341,9 +350,12 @@ pub async fn run_worker(mut queue: WorkQueue, executor: impl WorkExecutor) {
             WalRecord::WorkItemV2 { .. } => "work_item_v2",
             WalRecord::SinkAck { .. } => "sink_ack",
             WalRecord::SinkAckV2 { .. } => "sink_ack_v2",
+            WalRecord::DeleteDocument { .. } => "delete_document",
+            WalRecord::DeleteAck { .. } => "delete_ack",
         };
         let canonical_path = match &record {
             WalRecord::WorkItemV2 { fingerprint } => Some(fingerprint.canonical_path.as_str()),
+            WalRecord::DeleteDocument { canonical_path } => Some(canonical_path.as_str()),
             _ => None,
         };
 
@@ -619,6 +631,38 @@ impl WorkExecutor for PipelineExecutor {
                 })
                 .await;
             }
+            WalRecord::DeleteDocument { canonical_path } => {
+                let canonical_path_uri = canonical_path_to_file_uri(&canonical_path);
+                let doc_id = doc_id_from_canonical_path(&canonical_path_uri);
+
+                tracing::info!(
+                    canonical_path = canonical_path.as_str(),
+                    doc_id = %doc_id,
+                    "ragloom.pipeline.delete_document"
+                );
+
+                if let Err(err) = self
+                    .sink
+                    .delete_document_points(crate::sink::DocumentIdentity {
+                        canonical_path: canonical_path.clone(),
+                        doc_id,
+                    })
+                    .await
+                {
+                    tracing::warn!(
+                        canonical_path = canonical_path.as_str(),
+                        error.kind = %err.kind.to_string(),
+                        error.message = %err,
+                        "ragloom.sink.delete"
+                    );
+                    return;
+                }
+
+                tracing::info!(
+                    canonical_path = canonical_path.as_str(),
+                    "ragloom.pipeline.delete_document.success"
+                );
+            }
             WalRecord::WorkItem { .. } => {
                 // no-op
             }
@@ -626,6 +670,9 @@ impl WorkExecutor for PipelineExecutor {
                 // no-op
             }
             WalRecord::SinkAckV2 { .. } => {
+                // no-op
+            }
+            WalRecord::DeleteAck { .. } => {
                 // no-op
             }
         }
@@ -653,8 +700,12 @@ impl<E: WorkExecutor, W: WalStore + 'static> WorkExecutor for AckingExecutor<E, 
             WalRecord::WorkItemV2 { fingerprint } => Some(WalRecord::SinkAckV2 {
                 fingerprint: fingerprint.clone(),
             }),
+            WalRecord::DeleteDocument { canonical_path } => Some(WalRecord::DeleteAck {
+                canonical_path: canonical_path.clone(),
+            }),
             WalRecord::SinkAck { .. } => None,
             WalRecord::SinkAckV2 { .. } => None,
+            WalRecord::DeleteAck { .. } => None,
         };
 
         self.inner.execute(record).await;
@@ -822,28 +873,29 @@ mod tests {
     use super::*;
 
     use crate::ids::FileFingerprint;
-    use crate::source::FileVersionDiscovered;
+    use crate::source::{FileVersionDiscovered, SourceEvent};
 
     #[derive(Debug, Default)]
     struct FakeSource {
-        pending: Vec<FileVersionDiscovered>,
+        pending: Vec<SourceEvent>,
     }
 
     impl FakeSource {
         fn push(&mut self, file_version_id: [u8; 32]) {
-            self.pending.push(FileVersionDiscovered {
-                fingerprint: FileFingerprint {
-                    canonical_path: "/x/a.txt".to_string(),
-                    size_bytes: 10,
-                    mtime_unix_secs: 100,
-                },
-                file_version_id,
-            });
+            self.pending
+                .push(SourceEvent::FileVersionDiscovered(FileVersionDiscovered {
+                    fingerprint: FileFingerprint {
+                        canonical_path: "/x/a.txt".to_string(),
+                        size_bytes: 10,
+                        mtime_unix_secs: 100,
+                    },
+                    file_version_id,
+                }));
         }
     }
 
     impl Source for FakeSource {
-        fn poll(&mut self) -> Vec<FileVersionDiscovered> {
+        fn poll(&mut self) -> Vec<SourceEvent> {
             std::mem::take(&mut self.pending)
         }
     }
@@ -989,7 +1041,7 @@ mod tests {
         }
 
         impl crate::source::Source for CountingSource {
-            fn poll(&mut self) -> Vec<crate::source::FileVersionDiscovered> {
+            fn poll(&mut self) -> Vec<crate::source::SourceEvent> {
                 use std::sync::atomic::Ordering;
                 self.polls.fetch_add(1, Ordering::SeqCst);
                 Vec::new()
@@ -1130,10 +1182,12 @@ mod tests {
         }
 
         let mut source = FakeSource::default();
-        source.pending.push(FileVersionDiscovered {
-            file_version_id: crate::ids::file_version_id(&fingerprint),
-            fingerprint,
-        });
+        source
+            .pending
+            .push(SourceEvent::FileVersionDiscovered(FileVersionDiscovered {
+                file_version_id: crate::ids::file_version_id(&fingerprint),
+                fingerprint,
+            }));
         let mut runtime = Runtime::with_shared_wal(source, std::sync::Arc::clone(&wal));
 
         runtime.tick();

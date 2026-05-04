@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{RagloomError, RagloomErrorKind};
-use crate::sink::{Sink, VectorPoint};
+use crate::sink::{DocumentIdentity, Sink, VectorPoint};
 
 /// Qdrant HTTP client configuration.
 ///
@@ -145,6 +145,14 @@ impl QdrantSink {
 
         Ok(())
     }
+
+    fn delete_url(&self) -> String {
+        format!(
+            "{}/collections/{}/points/delete?wait=true",
+            self.config.base_url.trim_end_matches('/'),
+            self.config.collection
+        )
+    }
 }
 
 fn should_bypass_proxy(base_url: &str) -> bool {
@@ -216,11 +224,94 @@ impl Sink for QdrantSink {
 
         Ok(())
     }
+
+    async fn delete_document_points(&self, identity: DocumentIdentity) -> Result<(), RagloomError> {
+        let request = DeletePointsRequest {
+            filter: QdrantFilter {
+                must: vec![QdrantMatchCondition {
+                    key: "doc_id",
+                    r#match: QdrantMatchValue {
+                        value: identity.doc_id,
+                    },
+                }],
+            },
+        };
+
+        let response = self
+            .client
+            .post(self.delete_url())
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| {
+                RagloomError::new(RagloomErrorKind::Sink, e).with_context(format!(
+                    "qdrant delete request failed (url={})",
+                    self.delete_url()
+                ))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to read body>".to_string());
+            return Err(
+                RagloomError::from_kind(RagloomErrorKind::Sink).with_context(format!(
+                    "qdrant delete returned non-success status (url={}, canonical_path={}, status={}, body={})",
+                    self.delete_url(),
+                    identity.canonical_path,
+                    status,
+                    body
+                )),
+            );
+        }
+
+        let decoded: QdrantResponse = response.json().await.map_err(|e| {
+            RagloomError::new(RagloomErrorKind::Sink, e).with_context(format!(
+                "failed to decode qdrant delete response (url={})",
+                self.delete_url()
+            ))
+        })?;
+
+        if decoded.status != "ok" {
+            return Err(
+                RagloomError::from_kind(RagloomErrorKind::Sink).with_context(format!(
+                    "qdrant delete returned non-ok status in body (url={}, status={})",
+                    self.delete_url(),
+                    decoded.status
+                )),
+            );
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Serialize)]
 struct UpsertRequest {
     points: Vec<QdrantPoint>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeletePointsRequest {
+    filter: QdrantFilter,
+}
+
+#[derive(Debug, Serialize)]
+struct QdrantFilter {
+    must: Vec<QdrantMatchCondition>,
+}
+
+#[derive(Debug, Serialize)]
+struct QdrantMatchCondition {
+    key: &'static str,
+    r#match: QdrantMatchValue,
+}
+
+#[derive(Debug, Serialize)]
+struct QdrantMatchValue {
+    value: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -380,6 +471,33 @@ mod tests {
         .expect("sink");
 
         sink.upsert_points(vec![test_point()]).await.expect("ok");
+    }
+
+    #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
+    #[tokio::test]
+    async fn delete_document_points_sends_doc_id_filter() {
+        let (base_url, requests) =
+            spawn_sequence_test_server(vec![TestResponse::json(200, r#"{"status":"ok"}"#)]);
+
+        let sink = QdrantSink::new(QdrantConfig {
+            base_url,
+            collection: "docs".to_string(),
+            timeout: Duration::from_secs(5),
+        })
+        .expect("sink");
+
+        sink.delete_document_points(DocumentIdentity {
+            canonical_path: "file:///x/a.txt".to_string(),
+            doc_id: "doc123".to_string(),
+        })
+        .await
+        .expect("delete");
+
+        let requests = requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /collections/docs/points/delete?wait=true HTTP/1.1"));
+        assert!(requests[0].contains(r#""key":"doc_id""#));
+        assert!(requests[0].contains(r#""match":{"value":"doc123"}"#));
     }
 
     #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]

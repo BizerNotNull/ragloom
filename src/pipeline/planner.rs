@@ -20,6 +20,7 @@ use crate::error::RagloomError;
 #[derive(Debug, Default)]
 pub struct Planner {
     planned_versions: HashSet<[u8; 32]>,
+    planned_deletes: HashSet<String>,
 }
 
 impl Planner {
@@ -30,14 +31,28 @@ impl Planner {
     pub fn from_wal_records(records: &[WalRecord]) -> Self {
         let planned_versions = records
             .iter()
-            .map(|record| match record {
+            .filter_map(|record| match record {
                 WalRecord::WorkItemV2 { fingerprint } | WalRecord::SinkAckV2 { fingerprint } => {
-                    crate::ids::file_version_id(fingerprint)
+                    Some(crate::ids::file_version_id(fingerprint))
                 }
-                WalRecord::WorkItem { chunk_id } | WalRecord::SinkAck { chunk_id } => *chunk_id,
+                WalRecord::WorkItem { chunk_id } | WalRecord::SinkAck { chunk_id } => {
+                    Some(*chunk_id)
+                }
+                WalRecord::DeleteDocument { .. } | WalRecord::DeleteAck { .. } => None,
             })
             .collect();
-        Self { planned_versions }
+        let planned_deletes = records
+            .iter()
+            .filter_map(|record| match record {
+                WalRecord::DeleteDocument { canonical_path }
+                | WalRecord::DeleteAck { canonical_path } => Some(canonical_path.clone()),
+                _ => None,
+            })
+            .collect();
+        Self {
+            planned_versions,
+            planned_deletes,
+        }
     }
 
     /// Plans work for a discovery event.
@@ -63,6 +78,26 @@ impl Planner {
         })?;
         guard.append(WalRecord::WorkItemV2 {
             fingerprint: discovered.fingerprint.clone(),
+        })?;
+        Ok(())
+    }
+
+    /// Plans work for a deleted source document.
+    pub fn plan_file_delete(
+        &mut self,
+        canonical_path: &str,
+        wal: &std::sync::Arc<tokio::sync::Mutex<impl WalStore>>,
+    ) -> Result<(), RagloomError> {
+        if !self.planned_deletes.insert(canonical_path.to_string()) {
+            return Ok(());
+        }
+
+        let mut guard = wal.try_lock().map_err(|_| {
+            RagloomError::from_kind(crate::error::RagloomErrorKind::Internal)
+                .with_context("wal is currently locked")
+        })?;
+        guard.append(WalRecord::DeleteDocument {
+            canonical_path: canonical_path.to_string(),
         })?;
         Ok(())
     }
@@ -136,6 +171,29 @@ mod tests {
                     mtime_unix_secs: 100,
                 },
             }
+        );
+    }
+
+    #[test]
+    fn planner_emits_delete_work_separately_from_ingest_work() {
+        let mut planner = Planner::new();
+        let wal = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::state::wal::InMemoryWal::new(),
+        ));
+
+        planner
+            .plan_file_delete("/x/a.txt", &wal)
+            .expect("plan delete");
+        planner
+            .plan_file_delete("/x/a.txt", &wal)
+            .expect("plan delete again");
+
+        let records = wal.try_lock().expect("wal").read_all().expect("read all");
+        assert_eq!(
+            records,
+            vec![WalRecord::DeleteDocument {
+                canonical_path: "/x/a.txt".to_string()
+            }]
         );
     }
 

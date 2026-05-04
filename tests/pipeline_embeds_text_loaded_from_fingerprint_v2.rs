@@ -5,28 +5,29 @@ use ragloom::pipeline::runtime::{
     AckingExecutor, AsyncRuntime, PipelineExecutor, Runtime, run_worker,
 };
 use ragloom::sink::VectorPoint;
-use ragloom::source::{FileVersionDiscovered, Source};
+use ragloom::source::{FileVersionDiscovered, Source, SourceEvent};
 
 #[derive(Debug, Default)]
 struct FakeSource {
-    pending: Vec<FileVersionDiscovered>,
+    pending: Vec<SourceEvent>,
 }
 
 impl FakeSource {
     fn push(&mut self, canonical_path: &str, file_version_id: [u8; 32]) {
-        self.pending.push(FileVersionDiscovered {
-            fingerprint: ragloom::ids::FileFingerprint {
-                canonical_path: canonical_path.to_string(),
-                size_bytes: 10,
-                mtime_unix_secs: 100,
-            },
-            file_version_id,
-        });
+        self.pending
+            .push(SourceEvent::FileVersionDiscovered(FileVersionDiscovered {
+                fingerprint: ragloom::ids::FileFingerprint {
+                    canonical_path: canonical_path.to_string(),
+                    size_bytes: 10,
+                    mtime_unix_secs: 100,
+                },
+                file_version_id,
+            }));
     }
 }
 
 impl Source for FakeSource {
-    fn poll(&mut self) -> Vec<FileVersionDiscovered> {
+    fn poll(&mut self) -> Vec<SourceEvent> {
         std::mem::take(&mut self.pending)
     }
 }

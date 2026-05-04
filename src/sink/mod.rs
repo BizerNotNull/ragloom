@@ -19,6 +19,20 @@ pub use crate::sink::id::PointId;
 #[async_trait]
 pub trait Sink {
     async fn upsert_points(&self, points: Vec<VectorPoint>) -> Result<(), RagloomError>;
+
+    async fn delete_document_points(
+        &self,
+        _identity: DocumentIdentity,
+    ) -> Result<(), RagloomError> {
+        Ok(())
+    }
+}
+
+/// Stable document identity used for deleting all chunks of a source file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentIdentity {
+    pub canonical_path: String,
+    pub doc_id: String,
 }
 
 /// A single vector point with deterministic identifier.
