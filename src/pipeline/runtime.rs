@@ -933,6 +933,18 @@ impl ShutdownHandle {
     pub fn exit_reason(&self) -> Option<RuntimeExitReason> {
         *self.exit_rx.borrow()
     }
+
+    pub async fn wait_for_exit(&mut self) -> Option<RuntimeExitReason> {
+        loop {
+            if let Some(reason) = *self.exit_rx.borrow() {
+                return Some(reason);
+            }
+
+            if self.exit_rx.changed().await.is_err() {
+                return *self.exit_rx.borrow();
+            }
+        }
+    }
 }
 
 /// A minimal async runtime runner.
@@ -1312,18 +1324,13 @@ mod tests {
     async fn async_runtime_surfaces_startup_wal_read_failure() {
         let wal = std::sync::Arc::new(tokio::sync::Mutex::new(FailingWal));
         let runtime = Runtime::with_shared_wal(FakeSource::default(), wal);
-        let (mut rx, shutdown) = AsyncRuntime::new(runtime, 1).start();
+        let (mut rx, mut shutdown) = AsyncRuntime::new(runtime, 1).start();
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                if shutdown.exit_reason() == Some(RuntimeExitReason::StartupFailed) {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("startup failure should be surfaced");
+        let reason =
+            tokio::time::timeout(std::time::Duration::from_secs(1), shutdown.wait_for_exit())
+                .await
+                .expect("startup failure should be surfaced");
+        assert_eq!(reason, Some(RuntimeExitReason::StartupFailed));
 
         assert!(
             rx.recv().await.is_none(),
