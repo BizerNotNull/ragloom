@@ -107,6 +107,20 @@ jobs:
               )
           PY
 
+      - name: Check whether crates.io token is configured
+        id: cargo-token
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            echo "CARGO_REGISTRY_TOKEN is not configured; cargo publish will be skipped."
+          fi
+
       - name: Package crate
         if: steps.crates-io.outputs.should_publish == 'true'
         run: cargo package
@@ -116,10 +130,15 @@ jobs:
         run: cargo publish --dry-run
 
       - name: Publish crate
-        if: steps.crates-io.outputs.should_publish == 'true'
+        if: steps.crates-io.outputs.should_publish == 'true' && steps.cargo-token.outputs.has_token == 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish
+
+      - name: Skip publish without crates.io token
+        if: steps.crates-io.outputs.should_publish == 'true' && steps.cargo-token.outputs.has_token != 'true'
+        run: |
+          echo "Skipping cargo publish because CARGO_REGISTRY_TOKEN is not configured."
 
       - name: Skip publish for existing crates.io release
         if: steps.crates-io.outputs.should_publish != 'true'

@@ -109,8 +109,17 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
         "expected publish workflow to gate cargo publish behind a crates.io version check"
     );
     assert!(
+        publish_workflow.contains("cargo-token")
+            && publish_workflow.contains("Skip publish without crates.io token"),
+        "expected publish workflow to skip cargo publish cleanly when the crates.io token is unavailable"
+    );
+    assert!(
         release_workflow.contains("security-events: write"),
         "expected release workflow permissions to include security-events: write for reusable workflow calls"
+    );
+    assert!(
+        release_workflow.contains("already exists at ${RELEASE_REF}; reusing it"),
+        "expected release workflow to be rerunnable after creating the release tag"
     );
     assert!(
         !quality_workflow.contains("cargo +nightly miri"),
