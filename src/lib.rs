@@ -18,4 +18,7 @@ pub mod transform;
 
 pub mod observability;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use crate::error::{RagloomError, RagloomErrorKind};
