@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use ragloom::config::PipelineConfig;
+use ragloom::config::{DEFAULT_STATE_PATH, PipelineConfig};
 use ragloom::doc::FsUtf8Loader;
 use ragloom::embed::http_client::{HttpEmbeddingClient, HttpEmbeddingConfig};
 use ragloom::error::{RagloomError, RagloomErrorKind};
@@ -49,7 +49,6 @@ pub struct RunConfig {
     pub retry_max_backoff_ms: u64,
 }
 
-const DEFAULT_STATE_PATH: &str = ".ragloom/wal.ndjson";
 const USAGE: &str = "usage: ragloom [--config <path>] --dir <path> --qdrant-url <url> --collection <name> [--state-path <path>] [--retry-max-attempts <n>] [--embed-backend <openai|http>]";
 
 /// Top-level CLI command selected by argument parsing.
