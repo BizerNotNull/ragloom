@@ -3,8 +3,8 @@
 //! # Why a custom error type?
 //! A single crate-level error improves ergonomics for callers while still
 //! allowing the internals to differentiate failure categories via
-//! [`RagloomErrorKind`]. Context is stored alongside the underlying cause to
-//! preserve the "why" of a failure at the point it happened.
+//! [`RagloomErrorKind`]. Context is layered alongside the underlying cause to
+//! preserve the "why" of a failure across the boundaries it passes through.
 
 use std::error::Error as StdError;
 
@@ -16,13 +16,13 @@ use thiserror::Error;
 /// Callers typically want a single error type to bubble up through layers.
 /// [`RagloomError`] provides that stable surface while still exposing a
 /// machine-readable [`RagloomErrorKind`] and an optional human-readable
-/// context string.
+/// context layers.
 #[derive(Debug, Error)]
 #[error("{kind}{context}")]
 pub struct RagloomError {
     /// A coarse, machine-readable category for the failure.
     pub kind: RagloomErrorKind,
-    /// Additional human-readable context captured at the failure site.
+    /// Additional human-readable context captured at failure boundaries.
     context: RagloomErrorContext,
     /// The underlying cause, if any.
     #[source]
@@ -62,9 +62,10 @@ impl RagloomError {
     ///
     /// # Why
     /// Context should describe *why* an operation failed in terms meaningful
-    /// to the caller (e.g. which step, which input, which resource).
+    /// to the caller (e.g. which step, which input, which resource). Repeated
+    /// calls add outer context without dropping lower-level detail.
     pub fn with_context(mut self, context: impl Into<String>) -> Self {
-        self.context = RagloomErrorContext::new(context.into());
+        self.context.push_outer(context.into());
         self
     }
 }
@@ -114,7 +115,7 @@ impl std::fmt::Display for RagloomErrorKind {
 /// Error display should remain readable and stable. Centralizing the formatting
 /// avoids ad-hoc string concatenation across the codebase.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct RagloomErrorContext(Option<String>);
+pub(crate) struct RagloomErrorContext(Vec<String>);
 
 impl RagloomErrorContext {
     /// Creates an empty context.
@@ -122,28 +123,35 @@ impl RagloomErrorContext {
     /// # Why
     /// Most errors start without context and only gain it where it adds value.
     pub fn empty() -> Self {
-        Self(None)
+        Self(Vec::new())
     }
 
-    /// Creates a non-empty context.
+    /// Adds a higher-level context layer.
     ///
     /// # Why
-    /// Keeps a single place to normalize context strings.
-    pub fn new(context: String) -> Self {
+    /// Lower-level context should remain visible when callers attach the
+    /// operation that failed at their own boundary.
+    pub fn push_outer(&mut self, context: String) {
         let normalized = context.trim().to_owned();
         if normalized.is_empty() {
-            return Self::empty();
+            return;
         }
-        Self(Some(normalized))
+        self.0.insert(0, normalized);
     }
 }
 
 impl std::fmt::Display for RagloomErrorContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0.as_deref() {
-            Some(context) => write!(f, ": {context}"),
-            None => Ok(()),
+        let mut layers = self.0.iter();
+        let Some(first) = layers.next() else {
+            return Ok(());
+        };
+
+        write!(f, ": {first}")?;
+        for layer in layers {
+            write!(f, ": {layer}")?;
         }
+        Ok(())
     }
 }
 
@@ -164,6 +172,31 @@ mod tests {
 
         let formatted = error.to_string();
         assert!(formatted.contains("while parsing user profile"));
+    }
+
+    #[test]
+    fn repeated_context_preserves_inner_detail() {
+        let error = RagloomError::from_kind(RagloomErrorKind::Config)
+            .with_context("missing embed.endpoint")
+            .with_context("invalid config file: ragloom.yaml");
+
+        assert_eq!(
+            error.to_string(),
+            "config: invalid config file: ragloom.yaml: missing embed.endpoint"
+        );
+    }
+
+    #[test]
+    fn repeated_context_ignores_empty_layers() {
+        let error = RagloomError::from_kind(RagloomErrorKind::Config)
+            .with_context("missing embed.endpoint")
+            .with_context(" \n\t ")
+            .with_context("invalid config file: ragloom.yaml");
+
+        assert_eq!(
+            error.to_string(),
+            "config: invalid config file: ragloom.yaml: missing embed.endpoint"
+        );
     }
 
     #[test]
@@ -202,6 +235,23 @@ mod tests {
     fn source_can_be_retrieved_via_error_source_chain() {
         let root_cause = std::io::Error::other("disk full");
         let error = RagloomError::new(RagloomErrorKind::Io, root_cause);
+
+        let source = StdError::source(&error)
+            .expect("RagloomError::source() should return the underlying cause");
+        assert_eq!(source.to_string(), "disk full");
+    }
+
+    #[test]
+    fn repeated_context_preserves_source_chain() {
+        let root_cause = std::io::Error::other("disk full");
+        let error = RagloomError::new(RagloomErrorKind::Io, root_cause)
+            .with_context("reading source document")
+            .with_context("running pipeline worker");
+
+        assert_eq!(
+            error.to_string(),
+            "i/o: running pipeline worker: reading source document"
+        );
 
         let source = StdError::source(&error)
             .expect("RagloomError::source() should return the underlying cause");
