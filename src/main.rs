@@ -11,9 +11,10 @@ use ragloom::config::{DEFAULT_STATE_PATH, PipelineConfig};
 use ragloom::doc::FsUtf8Loader;
 use ragloom::embed::http_client::{HttpEmbeddingClient, HttpEmbeddingConfig};
 use ragloom::error::{RagloomError, RagloomErrorKind};
+use ragloom::observability::health::{HealthServer, HealthState};
 use ragloom::pipeline::runtime::{
     AckingExecutor, AsyncRuntime, IngestionSummary, PipelineExecutor, RetryPolicy, Runtime,
-    run_worker_with_retry,
+    RuntimeExitReason, run_worker_with_retry,
 };
 use ragloom::sink::qdrant::{QdrantConfig, QdrantSink};
 use ragloom::source::dir_scanner::DirectoryScannerSource;
@@ -30,6 +31,7 @@ pub struct RunConfig {
     pub qdrant_url: String,
     pub collection: String,
     pub state_path: String,
+    pub health_addr: Option<String>,
     pub create_collection_if_missing: bool,
     pub collection_vector_size: Option<usize>,
     pub chunker_strategy: String,
@@ -49,7 +51,7 @@ pub struct RunConfig {
     pub retry_max_backoff_ms: u64,
 }
 
-const USAGE: &str = "usage: ragloom [--config <path>] --dir <path> --qdrant-url <url> --collection <name> [--state-path <path>] [--retry-max-attempts <n>] [--embed-backend <openai|http>]";
+const USAGE: &str = "usage: ragloom [--config <path>] --dir <path> --qdrant-url <url> --collection <name> [--state-path <path>] [--health-addr <host:port>] [--retry-max-attempts <n>] [--embed-backend <openai|http>]";
 
 /// Top-level CLI command selected by argument parsing.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -99,6 +101,7 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
     let mut qdrant_url: Option<String> = None;
     let mut collection: Option<String> = None;
     let mut state_path: Option<String> = None;
+    let mut health_addr: Option<String> = None;
     let mut create_collection_if_missing = false;
     let mut collection_vector_size: Option<String> = None;
 
@@ -147,6 +150,7 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
             "--qdrant-url" => qdrant_url = next_value(),
             "--collection" => collection = next_value(),
             "--state-path" => state_path = next_value(),
+            "--health-addr" => health_addr = next_value(),
             "--create-collection-if-missing" => {
                 if inline_value.is_some() {
                     return Err(cli_invalid_input(
@@ -210,6 +214,14 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         .unwrap_or_else(|| DEFAULT_STATE_PATH.to_string());
     if state_path.trim().is_empty() {
         return Err(cli_config_error("--state-path or state.path is empty"));
+    }
+    let health_addr =
+        health_addr.or_else(|| file_config.as_ref().and_then(|c| c.health.addr.clone()));
+    if health_addr
+        .as_deref()
+        .is_some_and(|addr| addr.trim().is_empty())
+    {
+        return Err(cli_config_error("--health-addr or health.addr is empty"));
     }
     let collection_vector_size = collection_vector_size
         .map(|s| {
@@ -450,6 +462,7 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         qdrant_url,
         collection,
         state_path,
+        health_addr,
         create_collection_if_missing,
         collection_vector_size,
         chunker_strategy,
@@ -788,23 +801,54 @@ async fn try_main() -> Result<(), RagloomError> {
         ParsedCommand::Run(cfg) => *cfg,
     };
 
+    let health_state = HealthState::starting();
+    let health_server = match cfg.health_addr.as_deref() {
+        Some(addr) => match HealthServer::bind(addr, health_state.clone()).await {
+            Ok(server) => {
+                tracing::info!(
+                    event.name = "ragloom.health.started",
+                    addr = %addr,
+                    "ragloom.health.started"
+                );
+                Some(server)
+            }
+            Err(err) => {
+                health_state.mark_startup_failed();
+                return Err(err);
+            }
+        },
+        None => None,
+    };
+
     let PreparedStartup {
         embedding,
         sink,
         source,
         chunker,
-    } = prepare_startup(&cfg).await?;
+    } = match prepare_startup(&cfg).await {
+        Ok(startup) => startup,
+        Err(err) => {
+            health_state.mark_startup_failed();
+            return Err(err);
+        }
+    };
 
-    let wal = std::sync::Arc::new(tokio::sync::Mutex::new(
-        ragloom::state::wal::FileWal::open(&cfg.state_path)
-            .map_err(|e| e.with_context("failed to initialize persistent WAL"))?,
-    ));
+    let wal = match ragloom::state::wal::FileWal::open(&cfg.state_path)
+        .map_err(|e| e.with_context("failed to initialize persistent WAL"))
+    {
+        Ok(wal) => std::sync::Arc::new(tokio::sync::Mutex::new(wal)),
+        Err(err) => {
+            health_state.mark_startup_failed();
+            return Err(err);
+        }
+    };
 
     let runtime = Runtime::with_shared_wal(source, std::sync::Arc::clone(&wal));
     let summary = IngestionSummary::default();
     let (queue, shutdown) = AsyncRuntime::new(runtime, 128)
         .with_summary(summary.clone())
         .start();
+    let shutdown_for_monitor = shutdown.clone();
 
     let pipeline = PipelineExecutor::with_chunker(
         embedding,
@@ -830,16 +874,43 @@ async fn try_main() -> Result<(), RagloomError> {
         run_worker_with_retry(queue, executor, retry_policy, Some(summary_for_worker)).await;
     });
 
+    health_state.mark_ready();
+    let health_for_monitor = health_state.clone();
+    let health_monitor = tokio::spawn(async move {
+        loop {
+            match shutdown_for_monitor.exit_reason() {
+                Some(reason) => {
+                    mark_health_from_runtime_exit(&health_for_monitor, reason);
+                    return;
+                }
+                None if health_for_monitor.is_shutting_down() => return,
+                None => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+    });
+
     tokio::signal::ctrl_c().await.map_err(|e| {
         RagloomError::new(RagloomErrorKind::Internal, e)
             .with_context("failed to install Ctrl-C handler")
     })?;
 
+    health_state.mark_shutting_down();
     shutdown.shutdown();
+    if let Some(server) = health_server {
+        server.shutdown().await;
+    }
     let _ = worker.await;
+    let _ = health_monitor.await;
     summary.emit_if_dirty("shutdown");
 
     Ok(())
+}
+
+fn mark_health_from_runtime_exit(health: &HealthState, reason: RuntimeExitReason) {
+    match reason {
+        RuntimeExitReason::StartupFailed => health.mark_startup_failed(),
+        RuntimeExitReason::RuntimeFailed => health.mark_runtime_failed(),
+    }
 }
 
 #[cfg(test)]
@@ -1044,6 +1115,7 @@ mod tests {
                 qdrant_url: "http://qdrant".to_string(),
                 collection: "docs".to_string(),
                 state_path: DEFAULT_STATE_PATH.to_string(),
+                health_addr: None,
                 create_collection_if_missing: false,
                 collection_vector_size: None,
                 chunker_strategy: "recursive".to_string(),
@@ -1114,6 +1186,62 @@ mod tests {
             panic!("expected run config");
         };
         assert_eq!(cfg.state_path, ".state/ragloom.ndjson");
+    }
+
+    #[test]
+    fn parse_args_disables_health_endpoint_by_default() {
+        let args = vec![
+            "ragloom".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--embed-url".to_string(),
+            "http://embed".to_string(),
+            "--embed-model".to_string(),
+            "default".to_string(),
+            "--qdrant-url".to_string(),
+            "http://qdrant".to_string(),
+            "--collection".to_string(),
+            "docs".to_string(),
+        ];
+
+        let cfg = parse_args(&args).expect("config");
+        let ParsedCommand::Run(cfg) = cfg else {
+            panic!("expected run config");
+        };
+        assert_eq!(cfg.health_addr, None);
+    }
+
+    #[test]
+    fn parse_args_accepts_health_addr_separate_and_inline_values() {
+        for health_flag in [
+            vec!["--health-addr".to_string(), "127.0.0.1:0".to_string()],
+            vec!["--health-addr=127.0.0.1:0".to_string()],
+        ] {
+            let mut args = vec![
+                "ragloom".to_string(),
+                "--dir".to_string(),
+                "/tmp/docs".to_string(),
+                "--embed-backend".to_string(),
+                "http".to_string(),
+                "--embed-url".to_string(),
+                "http://embed".to_string(),
+                "--embed-model".to_string(),
+                "default".to_string(),
+                "--qdrant-url".to_string(),
+                "http://qdrant".to_string(),
+                "--collection".to_string(),
+                "docs".to_string(),
+            ];
+            args.extend(health_flag);
+
+            let cfg = parse_args(&args).expect("config");
+            let ParsedCommand::Run(cfg) = cfg else {
+                panic!("expected run config");
+            };
+            assert_eq!(cfg.health_addr.as_deref(), Some("127.0.0.1:0"));
+        }
     }
 
     #[test]
@@ -1397,6 +1525,7 @@ mod tests {
             qdrant_url: "http://qdrant".to_string(),
             collection: "docs".to_string(),
             state_path: DEFAULT_STATE_PATH.to_string(),
+            health_addr: None,
             create_collection_if_missing: true,
             collection_vector_size: Some(768),
             chunker_strategy: "recursive".to_string(),
@@ -1432,6 +1561,7 @@ mod tests {
             qdrant_url: "http://qdrant".to_string(),
             collection: "docs".to_string(),
             state_path: DEFAULT_STATE_PATH.to_string(),
+            health_addr: None,
             create_collection_if_missing: true,
             collection_vector_size: None,
             chunker_strategy: "recursive".to_string(),
@@ -1466,6 +1596,7 @@ mod tests {
             qdrant_url: "http://qdrant".to_string(),
             collection: "docs".to_string(),
             state_path: DEFAULT_STATE_PATH.to_string(),
+            health_addr: None,
             create_collection_if_missing: true,
             collection_vector_size: None,
             chunker_strategy: "recursive".to_string(),
@@ -1507,6 +1638,7 @@ mod tests {
             qdrant_url: base_url,
             collection: "docs".to_string(),
             state_path: DEFAULT_STATE_PATH.to_string(),
+            health_addr: None,
             create_collection_if_missing: true,
             collection_vector_size: None,
             chunker_strategy: "recursive".to_string(),
@@ -1567,6 +1699,7 @@ mod tests {
             qdrant_url: base_url.clone(),
             collection: "docs".to_string(),
             state_path: DEFAULT_STATE_PATH.to_string(),
+            health_addr: None,
             create_collection_if_missing: true,
             collection_vector_size: None,
             chunker_strategy: "recursive".to_string(),
@@ -1628,6 +1761,7 @@ mod tests {
             qdrant_url: base_url.clone(),
             collection: "docs".to_string(),
             state_path: DEFAULT_STATE_PATH.to_string(),
+            health_addr: None,
             create_collection_if_missing: true,
             collection_vector_size: Some(768),
             chunker_strategy: "recursive".to_string(),
@@ -1677,6 +1811,7 @@ mod tests {
             qdrant_url: "http://127.0.0.1:1".to_string(),
             collection: "docs".to_string(),
             state_path: DEFAULT_STATE_PATH.to_string(),
+            health_addr: None,
             create_collection_if_missing: true,
             collection_vector_size: None,
             chunker_strategy: "recursive".to_string(),
@@ -1765,6 +1900,8 @@ retry:
   max_queued: 32
   initial_backoff_ms: 10
   max_backoff_ms: 80
+health:
+  addr: "127.0.0.1:9000"
 "#,
         )
         .expect("write config");
@@ -1789,12 +1926,103 @@ retry:
         assert_eq!(cfg.retry_max_queued, 32);
         assert_eq!(cfg.retry_initial_backoff_ms, 10);
         assert_eq!(cfg.retry_max_backoff_ms, 80);
+        assert_eq!(cfg.health_addr.as_deref(), Some("127.0.0.1:9000"));
         assert_eq!(
             cfg.embed_backend,
             EmbedBackend::Http {
                 url: "http://embed-from-config".to_string(),
                 model: "default".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn parse_args_health_addr_cli_overrides_yaml_config() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  root: "/tmp/from-config"
+embed:
+  endpoint: "http://embed-from-config"
+sink:
+  qdrant_url: "http://qdrant-from-config"
+  collection: "from-config"
+health:
+  addr: "127.0.0.1:9000"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--health-addr".to_string(),
+            "127.0.0.1:9001".to_string(),
+        ];
+
+        let cfg = parse_args(&args).expect("config");
+        let ParsedCommand::Run(cfg) = cfg else {
+            panic!("expected run config");
+        };
+        assert_eq!(cfg.health_addr.as_deref(), Some("127.0.0.1:9001"));
+    }
+
+    #[test]
+    fn parse_args_rejects_empty_yaml_health_addr() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  root: "/tmp/from-config"
+embed:
+  endpoint: "http://embed-from-config"
+sink:
+  qdrant_url: "http://qdrant-from-config"
+  collection: "from-config"
+health:
+  addr: ""
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("should fail validation");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(err.to_string().contains("invalid config file"));
+    }
+
+    #[test]
+    fn runtime_exit_reason_updates_health_readiness() {
+        let health = HealthState::starting();
+        health.mark_ready();
+
+        mark_health_from_runtime_exit(&health, RuntimeExitReason::RuntimeFailed);
+
+        assert_eq!(
+            health.status(),
+            ragloom::observability::health::HealthStatus::NotReady
+        );
+        assert_eq!(
+            health.reason(),
+            Some(ragloom::observability::health::HealthFailureReason::RuntimeFailed)
+        );
+
+        let startup_health = HealthState::starting();
+        mark_health_from_runtime_exit(&startup_health, RuntimeExitReason::StartupFailed);
+        assert_eq!(
+            startup_health.reason(),
+            Some(ragloom::observability::health::HealthFailureReason::StartupFailed)
         );
     }
 
