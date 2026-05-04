@@ -680,11 +680,22 @@ impl<E: WorkExecutor, W: WalStore + 'static> WorkExecutor for AckingExecutor<E, 
 #[derive(Debug, Clone)]
 pub struct ShutdownHandle {
     tx: tokio::sync::watch::Sender<bool>,
+    exit_rx: tokio::sync::watch::Receiver<Option<RuntimeExitReason>>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RuntimeExitReason {
+    StartupFailed,
+    RuntimeFailed,
 }
 
 impl ShutdownHandle {
     pub fn shutdown(self) {
         let _ = self.tx.send(true);
+    }
+
+    pub fn exit_reason(&self) -> Option<RuntimeExitReason> {
+        *self.exit_rx.borrow()
     }
 }
 
@@ -723,12 +734,27 @@ impl<S: Source + Send + 'static, W: WalStore + 'static> AsyncRuntime<S, W> {
     pub fn start(mut self) -> (WorkQueue, ShutdownHandle) {
         let (tx, rx) = tokio::sync::mpsc::channel(self.capacity);
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let (exit_tx, exit_rx) = tokio::sync::watch::channel(None);
 
         tokio::spawn(async move {
-            let replay_records = match self.runtime.try_wal_records() {
-                Ok(records) => unacked_work_items(&records),
-                Err(err) if err.kind == RagloomErrorKind::Internal => Vec::new(),
-                Err(_) => return,
+            let replay_records = loop {
+                match self.runtime.try_wal_records() {
+                    Ok(records) => break unacked_work_items(&records),
+                    Err(err) if err.kind == RagloomErrorKind::Internal => {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            event.name = "ragloom.runtime.startup_failed",
+                            error.kind = %err.kind,
+                            error.message = %err,
+                            "ragloom.runtime.startup_failed"
+                        );
+                        let _ = exit_tx.send(Some(RuntimeExitReason::StartupFailed));
+                        return;
+                    }
+                }
             };
             let mut replayed_files = 0usize;
             for record in replay_records {
@@ -760,7 +786,16 @@ impl<S: Source + Send + 'static, W: WalStore + 'static> AsyncRuntime<S, W> {
                         tokio::task::yield_now().await;
                         continue;
                     }
-                    Err(_) => return,
+                    Err(err) => {
+                        tracing::error!(
+                            event.name = "ragloom.runtime.failed",
+                            error.kind = %err.kind,
+                            error.message = %err,
+                            "ragloom.runtime.failed"
+                        );
+                        let _ = exit_tx.send(Some(RuntimeExitReason::RuntimeFailed));
+                        return;
+                    }
                 };
                 let before = before_records.len();
 
@@ -772,7 +807,16 @@ impl<S: Source + Send + 'static, W: WalStore + 'static> AsyncRuntime<S, W> {
                         tokio::task::yield_now().await;
                         continue;
                     }
-                    Err(_) => return,
+                    Err(err) => {
+                        tracing::error!(
+                            event.name = "ragloom.runtime.failed",
+                            error.kind = %err.kind,
+                            error.message = %err,
+                            "ragloom.runtime.failed"
+                        );
+                        let _ = exit_tx.send(Some(RuntimeExitReason::RuntimeFailed));
+                        return;
+                    }
                 };
                 let after = after_records.len();
                 let mut discovered_files = 0usize;
@@ -813,7 +857,13 @@ impl<S: Source + Send + 'static, W: WalStore + 'static> AsyncRuntime<S, W> {
             }
         });
 
-        (rx, ShutdownHandle { tx: shutdown_tx })
+        (
+            rx,
+            ShutdownHandle {
+                tx: shutdown_tx,
+                exit_rx,
+            },
+        )
     }
 }
 
@@ -845,6 +895,24 @@ mod tests {
     impl Source for FakeSource {
         fn poll(&mut self) -> Vec<FileVersionDiscovered> {
             std::mem::take(&mut self.pending)
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FailingWal;
+
+    impl WalStore for FailingWal {
+        fn append(&mut self, _record: WalRecord) -> Result<(), RagloomError> {
+            Ok(())
+        }
+
+        fn read_all(&self) -> Result<Vec<WalRecord>, RagloomError> {
+            Err(RagloomError::from_kind(RagloomErrorKind::State)
+                .with_context("test wal read failure"))
+        }
+
+        fn is_empty(&self) -> bool {
+            false
         }
     }
 
@@ -1103,6 +1171,29 @@ mod tests {
         assert!(no_acked_replay.is_err());
 
         shutdown.shutdown();
+    }
+
+    #[tokio::test]
+    async fn async_runtime_surfaces_startup_wal_read_failure() {
+        let wal = std::sync::Arc::new(tokio::sync::Mutex::new(FailingWal));
+        let runtime = Runtime::with_shared_wal(FakeSource::default(), wal);
+        let (mut rx, shutdown) = AsyncRuntime::new(runtime, 1).start();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if shutdown.exit_reason() == Some(RuntimeExitReason::StartupFailed) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("startup failure should be surfaced");
+
+        assert!(
+            rx.recv().await.is_none(),
+            "queue should close after startup failure"
+        );
     }
 
     #[tokio::test]
