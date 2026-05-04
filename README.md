@@ -127,12 +127,12 @@ Download the archive for your platform from the GitHub Release page, extract it,
 Examples:
 
 ```bash
-tar -xzf ragloom-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf ragloom-v0.1.1-x86_64-unknown-linux-gnu.tar.gz
 ./ragloom --version
 ```
 
 ```powershell
-Expand-Archive .\ragloom-v0.1.0-x86_64-pc-windows-msvc.zip -DestinationPath .
+Expand-Archive .\ragloom-v0.1.1-x86_64-pc-windows-msvc.zip -DestinationPath .
 .\ragloom.exe --version
 ```
 
@@ -387,7 +387,7 @@ For first-run validation, look for `ragloom.ingest.summary`. Ragloom emits it af
 
 ### v0.1 - First-run experience
 
-Status: shipped in `v0.1.0`.
+Status: shipped in `v0.1.1`.
 
 - example environment for local Qdrant setup
 - clearer ingestion summary at runtime

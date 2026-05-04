@@ -1,9 +1,21 @@
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 fn read_repo_file(path: &str) -> String {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     fs::read_to_string(repo_root.join(path)).expect("read repository file")
+}
+
+fn crate_version() -> String {
+    let cargo_toml = read_repo_file("Cargo.toml");
+
+    cargo_toml
+        .lines()
+        .find_map(|line| line.strip_prefix("version = \""))
+        .and_then(|version| version.strip_suffix('"'))
+        .expect("Cargo.toml package.version is present")
+        .to_string()
 }
 
 #[test]
@@ -115,6 +127,36 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
     assert!(
         codeql_workflow.contains("languages: actions"),
         "expected CodeQL workflow to analyze GitHub Actions workflows"
+    );
+}
+
+#[test]
+fn release_version_verifier_accepts_v_prefixed_manual_version_input() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let output_file = tempfile::NamedTempFile::new().expect("create temporary GITHUB_OUTPUT");
+    let version = crate_version();
+
+    let output = Command::new("python")
+        .arg(".github/scripts/verify-release-version.py")
+        .current_dir(repo_root)
+        .env("EXPECTED_VERSION", format!("v{version}"))
+        .env("EXPECTED_TAG", "")
+        .env("GITHUB_OUTPUT", output_file.path())
+        .output()
+        .expect("run release version verifier with Python");
+
+    assert!(
+        output.status.success(),
+        "expected v-prefixed manual version input to verify successfully; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let github_output = fs::read_to_string(output_file.path()).expect("read GITHUB_OUTPUT");
+    let output_lines: Vec<_> = github_output.lines().collect();
+    assert!(
+        output_lines.contains(&format!("version={version}").as_str())
+            && output_lines.contains(&format!("tag=v{version}").as_str()),
+        "expected verifier to normalize the version output and derive the release tag"
     );
 }
 

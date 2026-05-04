@@ -22,6 +22,12 @@ def append_output(name: str, value: str) -> None:
         handle.write(f"{name}={value}\n")
 
 
+def normalize_version_input(version: str) -> str:
+    if version.startswith("v"):
+        return version.removeprefix("v")
+    return version
+
+
 def main() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     cargo_toml = repo_root / "Cargo.toml"
@@ -32,7 +38,9 @@ def main() -> None:
     except KeyError as error:
         fail(f"failed to read package.version from {cargo_toml}: {error}")
 
-    expected_version = os.environ.get("EXPECTED_VERSION", "").strip()
+    expected_version = normalize_version_input(
+        os.environ.get("EXPECTED_VERSION", "").strip()
+    )
     expected_tag = os.environ.get("EXPECTED_TAG", "").strip()
 
     if expected_tag:
