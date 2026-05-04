@@ -12,9 +12,10 @@ use ragloom::doc::FsUtf8Loader;
 use ragloom::embed::http_client::{HttpEmbeddingClient, HttpEmbeddingConfig};
 use ragloom::error::{RagloomError, RagloomErrorKind};
 use ragloom::observability::health::{HealthServer, HealthState};
+use ragloom::observability::metrics::IngestionMetrics;
 use ragloom::pipeline::runtime::{
     AckingExecutor, AsyncRuntime, IngestionSummary, PipelineExecutor, RetryPolicy, Runtime,
-    RuntimeExitReason, run_worker_with_retry,
+    RuntimeExitReason, run_worker_with_retry_and_metrics,
 };
 use ragloom::sink::qdrant::{QdrantConfig, QdrantSink};
 use ragloom::source::dir_scanner::DirectoryScannerSource;
@@ -802,21 +803,26 @@ async fn try_main() -> Result<(), RagloomError> {
     };
 
     let health_state = HealthState::starting();
+    let metrics = IngestionMetrics::default();
     let health_server = match cfg.health_addr.as_deref() {
-        Some(addr) => match HealthServer::bind(addr, health_state.clone()).await {
-            Ok(server) => {
-                tracing::info!(
-                    event.name = "ragloom.health.started",
-                    addr = %addr,
-                    "ragloom.health.started"
-                );
-                Some(server)
+        Some(addr) => {
+            match HealthServer::bind_with_metrics(addr, health_state.clone(), Some(metrics.clone()))
+                .await
+            {
+                Ok(server) => {
+                    tracing::info!(
+                        event.name = "ragloom.health.started",
+                        addr = %addr,
+                        "ragloom.health.started"
+                    );
+                    Some(server)
+                }
+                Err(err) => {
+                    health_state.mark_startup_failed();
+                    return Err(err);
+                }
             }
-            Err(err) => {
-                health_state.mark_startup_failed();
-                return Err(err);
-            }
-        },
+        }
         None => None,
     };
 
@@ -847,6 +853,7 @@ async fn try_main() -> Result<(), RagloomError> {
     let summary = IngestionSummary::default();
     let (queue, shutdown) = AsyncRuntime::new(runtime, 128)
         .with_summary(summary.clone())
+        .with_metrics(metrics.clone())
         .start();
     let mut shutdown_for_monitor = shutdown.clone();
 
@@ -856,7 +863,8 @@ async fn try_main() -> Result<(), RagloomError> {
         std::sync::Arc::new(FsUtf8Loader),
         chunker,
     )
-    .with_summary(summary.clone());
+    .with_summary(summary.clone())
+    .with_metrics(metrics.clone());
 
     let executor = AckingExecutor {
         inner: pipeline,
@@ -869,9 +877,17 @@ async fn try_main() -> Result<(), RagloomError> {
         max_backoff: Duration::from_millis(cfg.retry_max_backoff_ms),
     };
     let summary_for_worker = summary.clone();
+    let metrics_for_worker = metrics.clone();
 
     let worker = tokio::spawn(async move {
-        run_worker_with_retry(queue, executor, retry_policy, Some(summary_for_worker)).await;
+        run_worker_with_retry_and_metrics(
+            queue,
+            executor,
+            retry_policy,
+            Some(summary_for_worker),
+            Some(metrics_for_worker),
+        )
+        .await;
     });
 
     health_state.mark_ready();

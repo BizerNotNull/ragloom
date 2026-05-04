@@ -6,6 +6,7 @@
 //! straightforward to test.
 
 use crate::error::{RagloomError, RagloomErrorKind};
+use crate::observability::metrics::IngestionMetrics;
 use crate::pipeline::planner::Planner;
 use crate::source::Source;
 use crate::state::wal::{InMemoryWal, WalRecord, WalStore, unacked_work_items};
@@ -428,7 +429,7 @@ struct RetryItem {
 /// This is the smallest possible boundary between concurrency (queue) and
 /// processing (executor), making backpressure and shutdown behavior easy to test.
 pub async fn run_worker(mut queue: WorkQueue, executor: impl WorkExecutor) {
-    run_worker_with_retry_inner(&mut queue, executor, RetryPolicy::disabled(), None).await;
+    run_worker_with_retry_inner(&mut queue, executor, RetryPolicy::disabled(), None, None).await;
 }
 
 /// Runs a worker loop with a bounded in-process retry queue.
@@ -438,10 +439,20 @@ pub async fn run_worker(mut queue: WorkQueue, executor: impl WorkExecutor) {
 /// deterministic recovery window without changing WAL identity or introducing
 /// a durable dead-letter system.
 pub async fn run_worker_with_retry(
+    queue: WorkQueue,
+    executor: impl WorkExecutor,
+    policy: RetryPolicy,
+    summary: Option<IngestionSummary>,
+) {
+    run_worker_with_retry_and_metrics(queue, executor, policy, summary, None).await;
+}
+
+pub async fn run_worker_with_retry_and_metrics(
     mut queue: WorkQueue,
     executor: impl WorkExecutor,
     policy: RetryPolicy,
     summary: Option<IngestionSummary>,
+    metrics: Option<IngestionMetrics>,
 ) {
     if let Err(err) = policy.validate() {
         tracing::error!(
@@ -452,7 +463,7 @@ pub async fn run_worker_with_retry(
         );
         return;
     }
-    run_worker_with_retry_inner(&mut queue, executor, policy, summary).await;
+    run_worker_with_retry_inner(&mut queue, executor, policy, summary, metrics).await;
 }
 
 async fn run_worker_with_retry_inner(
@@ -460,17 +471,26 @@ async fn run_worker_with_retry_inner(
     executor: impl WorkExecutor,
     policy: RetryPolicy,
     summary: Option<IngestionSummary>,
+    metrics: Option<IngestionMetrics>,
 ) {
     let mut retries = VecDeque::<RetryItem>::new();
 
     loop {
         let item = if let Some(item) = retries.pop_front() {
+            if let Some(metrics) = &metrics {
+                metrics.record_retry_dequeued(retries.len());
+            }
             Some(item)
         } else {
-            queue.recv().await.map(|record| RetryItem {
-                record,
-                attempt: 1,
-                delay: std::time::Duration::ZERO,
+            queue.recv().await.map(|record| {
+                if let Some(metrics) = &metrics {
+                    metrics.record_work_dequeued();
+                }
+                RetryItem {
+                    record,
+                    attempt: 1,
+                    delay: std::time::Duration::ZERO,
+                }
             })
         };
 
@@ -510,7 +530,9 @@ async fn run_worker_with_retry_inner(
         .await
         .map_or_else(
             |err| {
-                if policy.should_retry(&err, attempt) && retries.len() < policy.max_queued_retries {
+                let retryable = is_retryable_error_kind(err.kind);
+                let should_retry = policy.should_retry(&err, attempt);
+                if should_retry && retries.len() < policy.max_queued_retries {
                     let next_attempt = attempt + 1;
                     let delay = policy.delay_before_attempt(next_attempt);
                     tracing::warn!(
@@ -527,6 +549,9 @@ async fn run_worker_with_retry_inner(
                         error.message = %err,
                         "ragloom.retry.scheduled"
                     );
+                    if let Some(metrics) = &metrics {
+                        metrics.record_retry_scheduled(retries.len() + 1);
+                    }
                     retries.push_back(RetryItem {
                         record,
                         attempt: next_attempt,
@@ -535,6 +560,12 @@ async fn run_worker_with_retry_inner(
                 } else {
                     if let Some(summary) = &summary {
                         summary.record_failure();
+                    }
+                    if let Some(metrics) = &metrics {
+                        metrics.record_failure();
+                        if retryable {
+                            metrics.record_retry_exhausted(retries.len());
+                        }
                     }
                     tracing::warn!(
                         event.name = "ragloom.ingest.failed",
@@ -565,6 +596,7 @@ pub struct PipelineExecutor {
     loader: std::sync::Arc<dyn crate::doc::DocumentLoader + Send + Sync>,
     chunker: std::sync::Arc<dyn crate::transform::chunker::Chunker>,
     summary: Option<IngestionSummary>,
+    metrics: Option<IngestionMetrics>,
 }
 
 impl Clone for PipelineExecutor {
@@ -575,6 +607,7 @@ impl Clone for PipelineExecutor {
             loader: self.loader.clone(),
             chunker: self.chunker.clone(),
             summary: self.summary.clone(),
+            metrics: self.metrics.clone(),
         }
     }
 }
@@ -597,6 +630,7 @@ impl PipelineExecutor {
             loader,
             chunker,
             summary: None,
+            metrics: None,
         }
     }
 
@@ -612,11 +646,17 @@ impl PipelineExecutor {
             loader,
             chunker,
             summary: None,
+            metrics: None,
         }
     }
 
     pub fn with_summary(mut self, summary: IngestionSummary) -> Self {
         self.summary = Some(summary);
+        self
+    }
+
+    pub fn with_metrics(mut self, metrics: IngestionMetrics) -> Self {
+        self.metrics = Some(metrics);
         self
     }
 }
@@ -798,6 +838,9 @@ impl WorkExecutor for PipelineExecutor {
                     if let Some(summary) = &self.summary {
                         summary.record_success(point_count);
                     }
+                    if let Some(metrics) = &self.metrics {
+                        metrics.record_success(point_count);
+                    }
                     tracing::info!(
                         canonical_path = fingerprint.canonical_path.as_str(),
                         point_count,
@@ -958,6 +1001,7 @@ pub struct AsyncRuntime<S: Source + Send + 'static, W: WalStore = InMemoryWal> {
     runtime: Runtime<S, W>,
     capacity: usize,
     summary: Option<IngestionSummary>,
+    metrics: Option<IngestionMetrics>,
 }
 
 impl<S: Source + Send + 'static, W: WalStore + 'static> AsyncRuntime<S, W> {
@@ -966,11 +1010,17 @@ impl<S: Source + Send + 'static, W: WalStore + 'static> AsyncRuntime<S, W> {
             runtime,
             capacity,
             summary: None,
+            metrics: None,
         }
     }
 
     pub fn with_summary(mut self, summary: IngestionSummary) -> Self {
         self.summary = Some(summary);
+        self
+    }
+
+    pub fn with_metrics(mut self, metrics: IngestionMetrics) -> Self {
+        self.metrics = Some(metrics);
         self
     }
 
@@ -1015,12 +1065,18 @@ impl<S: Source + Send + 'static, W: WalStore + 'static> AsyncRuntime<S, W> {
                 if tx.send(record).await.is_err() {
                     return;
                 }
+                if let Some(metrics) = &self.metrics {
+                    metrics.record_work_queued();
+                }
                 if shutdown_rx.has_changed().unwrap_or(false) && *shutdown_rx.borrow() {
                     return;
                 }
             }
             if let Some(summary) = &self.summary {
                 summary.record_discovered(replayed_files);
+            }
+            if let Some(metrics) = &self.metrics {
+                metrics.record_discovered(replayed_files);
             }
 
             loop {
@@ -1086,6 +1142,9 @@ impl<S: Source + Send + 'static, W: WalStore + 'static> AsyncRuntime<S, W> {
                     if tx.send(record).await.is_err() {
                         return;
                     }
+                    if let Some(metrics) = &self.metrics {
+                        metrics.record_work_queued();
+                    }
 
                     if shutdown_rx.has_changed().unwrap_or(false) && *shutdown_rx.borrow() {
                         return;
@@ -1094,6 +1153,9 @@ impl<S: Source + Send + 'static, W: WalStore + 'static> AsyncRuntime<S, W> {
 
                 if let Some(summary) = &self.summary {
                     summary.record_discovered(discovered_files);
+                }
+                if let Some(metrics) = &self.metrics {
+                    metrics.record_discovered(discovered_files);
                 }
 
                 if after == before {
@@ -1781,6 +1843,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pipeline_executor_records_success_metrics_after_sink_upsert() {
+        use crate::sink::VectorPoint;
+
+        #[derive(Debug, Clone, Default)]
+        struct StubDocumentLoader;
+
+        #[async_trait::async_trait]
+        impl crate::doc::DocumentLoader for StubDocumentLoader {
+            async fn load_utf8(&self, _path: &str) -> Result<String, crate::error::RagloomError> {
+                Ok("hello from stub loader".to_string())
+            }
+        }
+
+        #[derive(Debug, Clone, Default)]
+        struct StubEmbeddingProvider;
+
+        #[async_trait::async_trait]
+        impl crate::embed::EmbeddingProvider for StubEmbeddingProvider {
+            async fn embed(
+                &self,
+                inputs: &[String],
+            ) -> Result<Vec<Vec<f32>>, crate::error::RagloomError> {
+                Ok(inputs.iter().map(|_| vec![1.0_f32, 2.0_f32]).collect())
+            }
+        }
+
+        #[derive(Debug, Clone, Default)]
+        struct StubSink;
+
+        #[async_trait::async_trait]
+        impl crate::sink::Sink for StubSink {
+            async fn upsert_points(
+                &self,
+                _points: Vec<VectorPoint>,
+            ) -> Result<(), crate::error::RagloomError> {
+                Ok(())
+            }
+        }
+
+        let metrics = IngestionMetrics::default();
+        metrics.record_discovered(1);
+        let executor = PipelineExecutor::new(
+            std::sync::Arc::new(StubEmbeddingProvider),
+            std::sync::Arc::new(StubSink),
+            std::sync::Arc::new(StubDocumentLoader),
+        )
+        .with_metrics(metrics.clone());
+
+        executor
+            .execute(WalRecord::WorkItemV2 {
+                fingerprint: crate::ids::FileFingerprint {
+                    canonical_path: "/x/a.txt".to_string(),
+                    size_bytes: 10,
+                    mtime_unix_secs: 100,
+                },
+            })
+            .await
+            .expect("execute");
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.indexed_files_total, 1);
+        assert_eq!(snapshot.failed_files_total, 0);
+        assert!(snapshot.emitted_points_total > 0);
+        assert_eq!(snapshot.pending_files, 0);
+    }
+
+    #[tokio::test]
     async fn executor_writes_sink_ack_into_wal() {
         let wal = std::sync::Arc::new(tokio::sync::Mutex::new(
             crate::state::wal::InMemoryWal::new(),
@@ -2003,6 +2132,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_worker_records_failure_and_retry_metrics_after_exhaustion() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let metrics = IngestionMetrics::default();
+        metrics.record_discovered(1);
+
+        let executor = ScriptedExecutor::new(vec![
+            Err(RagloomErrorKind::Embed),
+            Err(RagloomErrorKind::Embed),
+        ]);
+
+        let metrics_for_worker = metrics.clone();
+        let worker = tokio::spawn(async move {
+            run_worker_with_retry_and_metrics(
+                rx,
+                executor,
+                RetryPolicy {
+                    max_attempts: 2,
+                    max_queued_retries: 1,
+                    initial_backoff: std::time::Duration::ZERO,
+                    max_backoff: std::time::Duration::ZERO,
+                },
+                None,
+                Some(metrics_for_worker),
+            )
+            .await;
+        });
+
+        tx.send(WalRecord::WorkItemV2 {
+            fingerprint: crate::ids::FileFingerprint {
+                canonical_path: "/x/a.txt".to_string(),
+                size_bytes: 10,
+                mtime_unix_secs: 100,
+            },
+        })
+        .await
+        .expect("send");
+        drop(tx);
+        worker.await.expect("worker");
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.failed_files_total, 1);
+        assert_eq!(snapshot.pending_files, 0);
+        assert_eq!(snapshot.retry_attempts_total, 1);
+        assert_eq!(snapshot.retry_exhausted_total, 1);
+        assert_eq!(snapshot.retry_queue_depth, 0);
+    }
+
+    #[tokio::test]
     async fn retry_worker_does_not_retry_non_retryable_error() {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let executor = ScriptedExecutor::new(vec![Err(RagloomErrorKind::InvalidInput)]);
@@ -2040,6 +2217,48 @@ mod tests {
             1,
             "invalid input should not be retried"
         );
+    }
+
+    #[tokio::test]
+    async fn retry_worker_does_not_count_non_retryable_error_as_retry_exhaustion() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let metrics = IngestionMetrics::default();
+        metrics.record_discovered(1);
+        let executor = ScriptedExecutor::new(vec![Err(RagloomErrorKind::InvalidInput)]);
+
+        let metrics_for_worker = metrics.clone();
+        let worker = tokio::spawn(async move {
+            run_worker_with_retry_and_metrics(
+                rx,
+                executor,
+                RetryPolicy {
+                    max_attempts: 3,
+                    max_queued_retries: 2,
+                    initial_backoff: std::time::Duration::ZERO,
+                    max_backoff: std::time::Duration::ZERO,
+                },
+                None,
+                Some(metrics_for_worker),
+            )
+            .await;
+        });
+
+        tx.send(WalRecord::WorkItemV2 {
+            fingerprint: crate::ids::FileFingerprint {
+                canonical_path: "/x/a.txt".to_string(),
+                size_bytes: 10,
+                mtime_unix_secs: 100,
+            },
+        })
+        .await
+        .expect("send");
+        drop(tx);
+        worker.await.expect("worker");
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.failed_files_total, 1);
+        assert_eq!(snapshot.retry_attempts_total, 0);
+        assert_eq!(snapshot.retry_exhausted_total, 0);
     }
 
     #[tokio::test]

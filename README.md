@@ -40,7 +40,7 @@ Supported today:
 - persistent local WAL state
 - bounded in-process retry for transient ingest failures
 - pretty and JSON structured logs
-- opt-in local health endpoint
+- opt-in local health and metrics endpoint
 
 Not supported yet:
 
@@ -482,6 +482,32 @@ with `ready: false` and a short `reason` such as `startup_failed` or
 `runtime_failed`. The endpoint does not include document text, API keys, or
 full local paths.
 
+### Metrics endpoint
+
+When the local health listener is enabled, Ragloom also exposes metrics on the
+same loopback address:
+
+```bash
+curl http://127.0.0.1:8080/metrics
+```
+
+The response uses the Prometheus text exposition format (`text/plain;
+version=0.0.4`) so local monitoring tools can scrape it directly. Metrics are
+numeric ingest and reliability counters only; they do not include document text,
+API keys, or full local paths.
+
+Current metrics:
+
+- `ragloom_discovered_files_total`
+- `ragloom_indexed_files_total`
+- `ragloom_failed_files_total`
+- `ragloom_emitted_points_total`
+- `ragloom_pending_files`
+- `ragloom_retry_attempts_total`
+- `ragloom_retry_exhausted_total`
+- `ragloom_retry_queue_depth`
+- `ragloom_work_queue_depth`
+
 For first-run validation, look for `ragloom.ingest.summary`. Ragloom emits it after an ingest window goes idle and again on shutdown when there is still unreported work. The summary stays structured and includes counters such as:
 
 - `discovered_files`
@@ -506,7 +532,7 @@ Status: shipped in `v0.1.1`.
 - bounded retry queue (shipped on `main`)
 - delete detection (shipped on `main`)
 - health endpoint (shipped on `main`)
-- metrics endpoint
+- metrics endpoint (shipped on `main`)
 
 ### v0.3 - More document coverage
 

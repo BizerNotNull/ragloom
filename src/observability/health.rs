@@ -8,6 +8,7 @@ use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::{RagloomError, RagloomErrorKind};
+use crate::observability::metrics::{IngestionMetrics, IngestionMetricsSnapshot};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum HealthStatus {
@@ -153,15 +154,27 @@ pub struct HealthServer {
 
 impl HealthServer {
     pub async fn bind(addr: &str, state: HealthState) -> Result<Self, RagloomError> {
+        Self::bind_with_metrics(addr, state, None).await
+    }
+
+    pub async fn bind_with_metrics(
+        addr: &str,
+        state: HealthState,
+        metrics: Option<IngestionMetrics>,
+    ) -> Result<Self, RagloomError> {
         let addr = parse_loopback_addr(addr)?;
         let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
             RagloomError::new(RagloomErrorKind::Io, e)
                 .with_context(format!("failed to bind health endpoint: {addr}"))
         })?;
-        Ok(Self::from_listener(listener, state))
+        Ok(Self::from_listener(listener, state, metrics))
     }
 
-    fn from_listener(listener: tokio::net::TcpListener, state: HealthState) -> Self {
+    fn from_listener(
+        listener: tokio::net::TcpListener,
+        state: HealthState,
+        metrics: Option<IngestionMetrics>,
+    ) -> Self {
         let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
         let join = tokio::spawn(async move {
@@ -176,8 +189,9 @@ impl HealthServer {
                         match accepted {
                             Ok((stream, _)) => {
                                 let state = state.clone();
+                                let metrics = metrics.clone();
                                 tokio::spawn(async move {
-                                    if let Err(err) = handle_connection(stream, state).await {
+                                    if let Err(err) = handle_connection(stream, state, metrics).await {
                                         tracing::debug!(
                                             event.name = "ragloom.health.connection_failed",
                                             error = %err,
@@ -224,6 +238,7 @@ fn parse_loopback_addr(addr: &str) -> Result<std::net::SocketAddr, RagloomError>
 async fn handle_connection(
     mut stream: tokio::net::TcpStream,
     state: HealthState,
+    metrics: Option<IngestionMetrics>,
 ) -> Result<(), std::io::Error> {
     let mut buf = [0_u8; 1024];
     let mut request = Vec::new();
@@ -245,7 +260,7 @@ async fn handle_connection(
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("");
 
-    let (status_code, reason, body) = match (method, target) {
+    let (status_code, reason, content_type, body) = match (method, target) {
         ("GET", "/health") => {
             let response = HealthResponse::from_state(&state);
             let status = if response.ready { 200 } else { 503 };
@@ -255,7 +270,7 @@ async fn handle_connection(
                 "Service Unavailable"
             };
             match serde_json::to_string(&response) {
-                Ok(body) => (status, reason, body),
+                Ok(body) => (status, reason, "application/json", body),
                 Err(err) => {
                     tracing::error!(
                         event.name = "ragloom.health.serialize_failed",
@@ -265,25 +280,89 @@ async fn handle_connection(
                     (
                         500,
                         "Internal Server Error",
+                        "application/json",
                         r#"{"error":"health_response_serialize_failed"}"#.to_string(),
                     )
                 }
             }
         }
-        ("GET", _) => (404, "Not Found", r#"{"error":"not_found"}"#.to_string()),
+        ("GET", "/metrics") => match metrics {
+            Some(metrics) => (
+                200,
+                "OK",
+                "text/plain; version=0.0.4; charset=utf-8",
+                render_metrics(metrics.snapshot()),
+            ),
+            None => (
+                404,
+                "Not Found",
+                "application/json",
+                r#"{"error":"not_found"}"#.to_string(),
+            ),
+        },
+        ("GET", _) => (
+            404,
+            "Not Found",
+            "application/json",
+            r#"{"error":"not_found"}"#.to_string(),
+        ),
         _ => (
             405,
             "Method Not Allowed",
+            "application/json",
             r#"{"error":"method_not_allowed"}"#.to_string(),
         ),
     };
 
     let response = format!(
-        "HTTP/1.1 {status_code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status_code} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(response.as_bytes()).await?;
     stream.shutdown().await
+}
+
+fn render_metrics(snapshot: IngestionMetricsSnapshot) -> String {
+    format!(
+        "\
+# HELP ragloom_discovered_files_total Total file versions discovered for ingest.
+# TYPE ragloom_discovered_files_total counter
+ragloom_discovered_files_total {}
+# HELP ragloom_indexed_files_total Total file versions indexed successfully.
+# TYPE ragloom_indexed_files_total counter
+ragloom_indexed_files_total {}
+# HELP ragloom_failed_files_total Total file versions that exhausted processing.
+# TYPE ragloom_failed_files_total counter
+ragloom_failed_files_total {}
+# HELP ragloom_emitted_points_total Total vector points emitted to the sink.
+# TYPE ragloom_emitted_points_total counter
+ragloom_emitted_points_total {}
+# HELP ragloom_pending_files Current discovered file versions not yet indexed or failed.
+# TYPE ragloom_pending_files gauge
+ragloom_pending_files {}
+# HELP ragloom_retry_attempts_total Total retry attempts scheduled after transient failures.
+# TYPE ragloom_retry_attempts_total counter
+ragloom_retry_attempts_total {}
+# HELP ragloom_retry_exhausted_total Total work items that exhausted retry handling.
+# TYPE ragloom_retry_exhausted_total counter
+ragloom_retry_exhausted_total {}
+# HELP ragloom_retry_queue_depth Current in-process retry queue depth.
+# TYPE ragloom_retry_queue_depth gauge
+ragloom_retry_queue_depth {}
+# HELP ragloom_work_queue_depth Current runtime-to-worker queue depth.
+# TYPE ragloom_work_queue_depth gauge
+ragloom_work_queue_depth {}
+",
+        snapshot.discovered_files_total,
+        snapshot.indexed_files_total,
+        snapshot.failed_files_total,
+        snapshot.emitted_points_total,
+        snapshot.pending_files,
+        snapshot.retry_attempts_total,
+        snapshot.retry_exhausted_total,
+        snapshot.retry_queue_depth,
+        snapshot.work_queue_depth
+    )
 }
 
 #[cfg(test)]
@@ -295,7 +374,21 @@ mod tests {
             .await
             .expect("bind");
         let addr = listener.local_addr().expect("addr");
-        (addr, HealthServer::from_listener(listener, state))
+        (addr, HealthServer::from_listener(listener, state, None))
+    }
+
+    async fn spawn_server_with_metrics(
+        state: HealthState,
+        metrics: IngestionMetrics,
+    ) -> (std::net::SocketAddr, HealthServer) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        (
+            addr,
+            HealthServer::from_listener(listener, state, Some(metrics)),
+        )
     }
 
     async fn request(addr: std::net::SocketAddr, raw: &str) -> String {
@@ -377,6 +470,50 @@ mod tests {
 
         let method = request(addr, "POST /health HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
         assert!(method.starts_with("HTTP/1.1 405 Method Not Allowed"));
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn metrics_response_reports_ingest_and_reliability_counters() {
+        let state = HealthState::starting();
+        state.mark_ready();
+        let metrics = IngestionMetrics::default();
+        metrics.record_discovered(2);
+        metrics.record_success(3);
+        metrics.record_retry_scheduled(1);
+        metrics.record_retry_exhausted(0);
+        metrics.record_failure();
+        let (addr, server) = spawn_server_with_metrics(state, metrics).await;
+
+        let response = request(addr, "GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("Content-Type: text/plain; version=0.0.4; charset=utf-8"));
+        assert!(content_length_matches_body(&response));
+        let (_, body) = response.split_once("\r\n\r\n").expect("body");
+        assert!(body.contains("ragloom_discovered_files_total 2"));
+        assert!(body.contains("ragloom_indexed_files_total 1"));
+        assert!(body.contains("ragloom_failed_files_total 1"));
+        assert!(body.contains("ragloom_emitted_points_total 3"));
+        assert!(body.contains("ragloom_pending_files 0"));
+        assert!(body.contains("ragloom_retry_attempts_total 1"));
+        assert!(body.contains("ragloom_retry_exhausted_total 1"));
+        assert!(body.contains("ragloom_retry_queue_depth 0"));
+        assert!(body.contains("ragloom_work_queue_depth 0"));
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn metrics_route_is_not_available_without_metrics_state() {
+        let state = HealthState::starting();
+        state.mark_ready();
+        let (addr, server) = spawn_server(state).await;
+
+        let response = request(addr, "GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"));
 
         server.shutdown().await;
     }

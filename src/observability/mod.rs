@@ -2,6 +2,7 @@ use crate::error::{RagloomError, RagloomErrorKind};
 use tracing_subscriber::EnvFilter;
 
 pub mod health;
+pub mod metrics;
 
 /// Log output format.
 ///

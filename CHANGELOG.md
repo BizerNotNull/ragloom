@@ -16,6 +16,8 @@
   failures, configurable with `retry.*` YAML keys or `--retry-*` CLI flags.
 - Opt-in local health endpoint, configurable with `health.addr` or
   `--health-addr`, returning minimal daemon status and build/version JSON.
+- Prometheus-compatible `/metrics` endpoint on the same local health listener,
+  exposing ingest progress, retry reliability counters, and queue depth gauges.
 
 ### Notes
 - The WAL format is append-only newline-delimited JSON. Corrupt or unreadable
@@ -30,6 +32,8 @@
 - The health endpoint is disabled by default and only exposes readiness,
   version, and build metadata. Startup/bootstrap failures and fatal runtime-loop
   failures report `ready: false`.
+- The metrics endpoint is enabled with the health listener and exposes numeric
+  counters only, without document contents, secrets, or full local paths.
 
 ## [0.1.0] - 2026-05-01
 
