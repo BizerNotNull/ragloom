@@ -21,6 +21,8 @@ pub struct PipelineConfig {
     pub sink: SinkConfig,
     #[serde(default)]
     pub state: StateConfig,
+    #[serde(default)]
+    pub retry: RetryConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -51,6 +53,45 @@ impl Default for StateConfig {
             path: default_state_path(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RetryConfig {
+    #[serde(default = "default_retry_max_attempts")]
+    pub max_attempts: u32,
+    #[serde(default = "default_retry_max_queued")]
+    pub max_queued: usize,
+    #[serde(default = "default_retry_initial_backoff_ms")]
+    pub initial_backoff_ms: u64,
+    #[serde(default = "default_retry_max_backoff_ms")]
+    pub max_backoff_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: default_retry_max_attempts(),
+            max_queued: default_retry_max_queued(),
+            initial_backoff_ms: default_retry_initial_backoff_ms(),
+            max_backoff_ms: default_retry_max_backoff_ms(),
+        }
+    }
+}
+
+fn default_retry_max_attempts() -> u32 {
+    3
+}
+
+fn default_retry_max_queued() -> usize {
+    128
+}
+
+fn default_retry_initial_backoff_ms() -> u64 {
+    100
+}
+
+fn default_retry_max_backoff_ms() -> u64 {
+    2_000
 }
 
 fn default_state_path() -> String {
@@ -96,6 +137,18 @@ impl PipelineConfig {
             return Err(RagloomError::from_kind(RagloomErrorKind::Config)
                 .with_context("state.path is empty"));
         }
+        if self.retry.max_attempts == 0 {
+            return Err(RagloomError::from_kind(RagloomErrorKind::Config)
+                .with_context("retry.max_attempts must be at least 1"));
+        }
+        if self.retry.max_attempts > 1 && self.retry.max_queued == 0 {
+            return Err(RagloomError::from_kind(RagloomErrorKind::Config)
+                .with_context("retry.max_queued must be at least 1 when retries are enabled"));
+        }
+        if self.retry.max_backoff_ms < self.retry.initial_backoff_ms {
+            return Err(RagloomError::from_kind(RagloomErrorKind::Config)
+                .with_context("retry.max_backoff_ms must be >= retry.initial_backoff_ms"));
+        }
         Ok(())
     }
 }
@@ -116,9 +169,34 @@ sink:
   collection: "docs"
 state:
   path: ".ragloom/wal.ndjson"
+retry:
+  max_attempts: 3
+  max_queued: 128
+  initial_backoff_ms: 100
+  max_backoff_ms: 2000
 "#;
         let cfg = PipelineConfig::from_yaml_str(yaml).expect("parse");
         cfg.validate().expect("validate");
         assert_eq!(cfg.state.path, ".ragloom/wal.ndjson");
+        assert_eq!(cfg.retry.max_attempts, 3);
+    }
+
+    #[test]
+    fn rejects_invalid_retry_config() {
+        let yaml = r#"
+source:
+  root: "/data"
+embed:
+  endpoint: "http://localhost:8080/embed"
+sink:
+  qdrant_url: "http://localhost:6333"
+  collection: "docs"
+retry:
+  max_attempts: 0
+"#;
+        let cfg = PipelineConfig::from_yaml_str(yaml).expect("parse");
+        let err = cfg.validate().expect_err("validate");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(err.to_string().contains("retry.max_attempts"));
     }
 }

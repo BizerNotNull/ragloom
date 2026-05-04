@@ -373,6 +373,12 @@ Each Qdrant point includes chunk text plus metadata such as:
 
 This is the part of Ragloom that makes inspection easier: you can look at a point in Qdrant and see where it came from, how it was chunked, and which neighboring chunks surround it.
 
+## Delete Synchronization
+
+Ragloom tracks files it has previously observed under the configured source root. When a completed scan no longer sees one of those paths, the runtime plans a durable delete work item and the Qdrant sink removes all points with that document's stable `doc_id`.
+
+Delete synchronization is idempotent and replay-safe: rerunning the same delete work is expected to leave Qdrant in the same state. Ragloom does not delete points for files it has never observed, and this is document-level cleanup only; it does not create, drop, or otherwise manage whole collections.
+
 ## Observability
 
 Ragloom emits `tracing` events for discovery, startup, embedding, Qdrant writes, and ingest completion summaries.
@@ -411,8 +417,8 @@ Status: shipped in `v0.1.1`.
 ### v0.2 - More reliable daemon behavior
 
 - persistent local state (shipped on `main`)
+- delete detection (shipped on `main`)
 - retry queue
-- delete detection
 - health endpoint
 - metrics endpoint
 
