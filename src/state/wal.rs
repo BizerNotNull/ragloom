@@ -205,8 +205,8 @@ impl WalStore for FileWal {
     }
 
     fn is_empty(&self) -> bool {
-        self.read_all()
-            .map(|records| records.is_empty())
+        std::fs::metadata(&self.path)
+            .map(|metadata| metadata.len() == 0)
             .unwrap_or(false)
     }
 }
@@ -396,5 +396,18 @@ mod tests {
         assert!(err.to_string().contains("failed to validate WAL file"));
         let source = std::error::Error::source(&err).expect("source");
         assert!(source.to_string().contains("failed to parse WAL record"));
+    }
+
+    #[test]
+    fn file_wal_is_empty_uses_file_metadata_without_parsing() {
+        let mut file = NamedTempFile::new().expect("temp wal");
+        let wal = FileWal {
+            path: file.path().to_path_buf(),
+        };
+        assert!(wal.is_empty());
+
+        file.write_all(b"{not json}\n")
+            .expect("write invalid content");
+        assert!(!wal.is_empty());
     }
 }
