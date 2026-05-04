@@ -539,22 +539,32 @@ fn embedding_fingerprint(cfg: &RunConfig) -> String {
     }
 }
 
+const OPENAI_EMBEDDING_VECTOR_SIZES: &[(&str, usize)] = &[
+    ("text-embedding-3-small", 1536),
+    ("text-embedding-3-large", 3072),
+    ("text-embedding-ada-002", 1536),
+];
+
+fn openai_embedding_vector_size(model: &str) -> Option<usize> {
+    OPENAI_EMBEDDING_VECTOR_SIZES
+        .iter()
+        .find_map(|(known_model, size)| (*known_model == model).then_some(*size))
+}
+
 fn resolve_collection_vector_size(cfg: &RunConfig) -> Result<usize, RagloomError> {
     if let Some(size) = cfg.collection_vector_size {
         return Ok(size);
     }
 
     match &cfg.embed_backend {
-        EmbedBackend::OpenAi { model, .. } => match model.as_str() {
-            "text-embedding-3-small" => Ok(1536),
-            "text-embedding-3-large" => Ok(3072),
-            "text-embedding-ada-002" => Ok(1536),
-            other => Err(RagloomError::from_kind(RagloomErrorKind::Config).with_context(
-                format!(
-                    "unknown OpenAI model for collection vector size: {other}; pass --collection-vector-size"
-                ),
-            )),
-        },
+        EmbedBackend::OpenAi { model, .. } => {
+            openai_embedding_vector_size(model).ok_or_else(|| {
+                let context = format!(
+                    "unknown OpenAI model for collection vector size: {model}; pass --collection-vector-size"
+                );
+                RagloomError::from_kind(RagloomErrorKind::Config).with_context(context)
+            })
+        }
         EmbedBackend::Http { .. } => Err(RagloomError::from_kind(RagloomErrorKind::Config)
             .with_context("http backend requires --collection-vector-size")),
     }
@@ -1479,7 +1489,7 @@ mod tests {
 
     #[test]
     fn resolve_collection_vector_size_infers_known_openai_model_size() {
-        let cfg = RunConfig {
+        let mut cfg = RunConfig {
             dir: "/tmp/docs".to_string(),
             embed_backend: EmbedBackend::OpenAi {
                 endpoint: "https://api.openai.com/v1/embeddings".to_string(),
@@ -1509,8 +1519,16 @@ mod tests {
             retry_max_backoff_ms: 2_000,
         };
 
-        let size = resolve_collection_vector_size(&cfg).expect("vector size");
-        assert_eq!(size, 1536);
+        for (model, expected_size) in OPENAI_EMBEDDING_VECTOR_SIZES {
+            cfg.embed_backend = EmbedBackend::OpenAi {
+                endpoint: "https://api.openai.com/v1/embeddings".to_string(),
+                api_key: "test-key".to_string(),
+                model: model.to_string(),
+            };
+
+            let size = resolve_collection_vector_size(&cfg).expect("vector size");
+            assert_eq!(size, *expected_size);
+        }
     }
 
     #[test]
