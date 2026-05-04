@@ -226,6 +226,7 @@ impl Sink for QdrantSink {
     }
 
     async fn delete_document_points(&self, identity: DocumentIdentity) -> Result<(), RagloomError> {
+        let delete_url = self.delete_url();
         let request = DeletePointsRequest {
             filter: QdrantFilter {
                 must: vec![QdrantMatchCondition {
@@ -239,15 +240,13 @@ impl Sink for QdrantSink {
 
         let response = self
             .client
-            .post(self.delete_url())
+            .post(&delete_url)
             .json(&request)
             .send()
             .await
             .map_err(|e| {
-                RagloomError::new(RagloomErrorKind::Sink, e).with_context(format!(
-                    "qdrant delete request failed (url={})",
-                    self.delete_url()
-                ))
+                RagloomError::new(RagloomErrorKind::Sink, e)
+                    .with_context(format!("qdrant delete request failed (url={delete_url})"))
             })?;
 
         if !response.status().is_success() {
@@ -258,8 +257,7 @@ impl Sink for QdrantSink {
                 .unwrap_or_else(|_| "<failed to read body>".to_string());
             return Err(
                 RagloomError::from_kind(RagloomErrorKind::Sink).with_context(format!(
-                    "qdrant delete returned non-success status (url={}, canonical_path={}, status={}, body={})",
-                    self.delete_url(),
+                    "qdrant delete returned non-success status (url={delete_url}, canonical_path={}, status={}, body={})",
                     identity.canonical_path,
                     status,
                     body
@@ -269,16 +267,14 @@ impl Sink for QdrantSink {
 
         let decoded: QdrantResponse = response.json().await.map_err(|e| {
             RagloomError::new(RagloomErrorKind::Sink, e).with_context(format!(
-                "failed to decode qdrant delete response (url={})",
-                self.delete_url()
+                "failed to decode qdrant delete response (url={delete_url})"
             ))
         })?;
 
         if decoded.status != "ok" {
             return Err(
                 RagloomError::from_kind(RagloomErrorKind::Sink).with_context(format!(
-                    "qdrant delete returned non-ok status in body (url={}, status={})",
-                    self.delete_url(),
+                    "qdrant delete returned non-ok status in body (url={delete_url}, status={})",
                     decoded.status
                 )),
             );

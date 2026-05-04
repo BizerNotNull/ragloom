@@ -9,6 +9,8 @@ use serde::Deserialize;
 
 use crate::error::{RagloomError, RagloomErrorKind};
 
+pub const DEFAULT_STATE_PATH: &str = ".ragloom/wal.ndjson";
+
 /// Top-level pipeline configuration.
 ///
 /// # Why
@@ -47,14 +49,6 @@ pub struct StateConfig {
     pub path: String,
 }
 
-impl Default for StateConfig {
-    fn default() -> Self {
-        Self {
-            path: default_state_path(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct RetryConfig {
     #[serde(default = "default_retry_max_attempts")]
@@ -67,6 +61,14 @@ pub struct RetryConfig {
     pub max_backoff_ms: u64,
 }
 
+impl Default for StateConfig {
+    fn default() -> Self {
+        Self {
+            path: default_state_path(),
+        }
+    }
+}
+
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
@@ -76,6 +78,10 @@ impl Default for RetryConfig {
             max_backoff_ms: default_retry_max_backoff_ms(),
         }
     }
+}
+
+fn default_state_path() -> String {
+    DEFAULT_STATE_PATH.to_string()
 }
 
 fn default_retry_max_attempts() -> u32 {
@@ -92,10 +98,6 @@ fn default_retry_initial_backoff_ms() -> u64 {
 
 fn default_retry_max_backoff_ms() -> u64 {
     2_000
-}
-
-fn default_state_path() -> String {
-    ".ragloom/wal.ndjson".to_string()
 }
 
 impl PipelineConfig {

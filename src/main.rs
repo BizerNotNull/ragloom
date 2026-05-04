@@ -7,12 +7,13 @@
 
 use std::time::Duration;
 
-use ragloom::config::PipelineConfig;
+use ragloom::config::{DEFAULT_STATE_PATH, PipelineConfig};
 use ragloom::doc::FsUtf8Loader;
 use ragloom::embed::http_client::{HttpEmbeddingClient, HttpEmbeddingConfig};
 use ragloom::error::{RagloomError, RagloomErrorKind};
 use ragloom::pipeline::runtime::{
-    AckingExecutor, AsyncRuntime, IngestionSummary, PipelineExecutor, Runtime, run_worker,
+    AckingExecutor, AsyncRuntime, IngestionSummary, PipelineExecutor, RetryPolicy, Runtime,
+    run_worker_with_retry,
 };
 use ragloom::sink::qdrant::{QdrantConfig, QdrantSink};
 use ragloom::source::dir_scanner::DirectoryScannerSource;
@@ -42,10 +43,13 @@ pub struct RunConfig {
     pub enable_semantic: bool,
     pub semantic_provider: String,
     pub semantic_percentile: u8,
+    pub retry_max_attempts: u32,
+    pub retry_max_queued: usize,
+    pub retry_initial_backoff_ms: u64,
+    pub retry_max_backoff_ms: u64,
 }
 
-const DEFAULT_STATE_PATH: &str = ".ragloom/wal.ndjson";
-const USAGE: &str = "usage: ragloom [--config <path>] --dir <path> --qdrant-url <url> --collection <name> [--state-path <path>] [--embed-backend <openai|http>]";
+const USAGE: &str = "usage: ragloom [--config <path>] --dir <path> --qdrant-url <url> --collection <name> [--state-path <path>] [--retry-max-attempts <n>] [--embed-backend <openai|http>]";
 
 /// Top-level CLI command selected by argument parsing.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -109,6 +113,10 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
     let mut enable_semantic = false;
     let mut semantic_provider: Option<String> = None;
     let mut semantic_percentile: Option<String> = None;
+    let mut retry_max_attempts: Option<String> = None;
+    let mut retry_max_queued: Option<String> = None;
+    let mut retry_initial_backoff_ms: Option<String> = None;
+    let mut retry_max_backoff_ms: Option<String> = None;
 
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
@@ -166,6 +174,10 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
             }
             "--semantic-provider" => semantic_provider = next_value(),
             "--semantic-percentile" => semantic_percentile = next_value(),
+            "--retry-max-attempts" => retry_max_attempts = next_value(),
+            "--retry-max-queued" => retry_max_queued = next_value(),
+            "--retry-initial-backoff-ms" => retry_initial_backoff_ms = next_value(),
+            "--retry-max-backoff-ms" => retry_max_backoff_ms = next_value(),
             "--help" | "-h" => return Ok(ParsedCommand::Help),
             "--version" | "-V" => return Ok(ParsedCommand::Version),
             unknown => return Err(cli_invalid_input(format!("unknown flag: {unknown}"))),
@@ -380,6 +392,58 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         );
     }
 
+    let retry_max_attempts = retry_max_attempts
+        .map(|s| {
+            s.parse::<u32>().map_err(|e| {
+                RagloomError::from_kind(RagloomErrorKind::InvalidInput)
+                    .with_context(format!("--retry-max-attempts must be integer: {e}"))
+            })
+        })
+        .transpose()?
+        .or_else(|| file_config.as_ref().map(|c| c.retry.max_attempts))
+        .unwrap_or(3);
+
+    let retry_max_queued = retry_max_queued
+        .map(|s| {
+            s.parse::<usize>().map_err(|e| {
+                RagloomError::from_kind(RagloomErrorKind::InvalidInput)
+                    .with_context(format!("--retry-max-queued must be integer: {e}"))
+            })
+        })
+        .transpose()?
+        .or_else(|| file_config.as_ref().map(|c| c.retry.max_queued))
+        .unwrap_or(128);
+
+    let retry_initial_backoff_ms = retry_initial_backoff_ms
+        .map(|s| {
+            s.parse::<u64>().map_err(|e| {
+                RagloomError::from_kind(RagloomErrorKind::InvalidInput)
+                    .with_context(format!("--retry-initial-backoff-ms must be integer: {e}"))
+            })
+        })
+        .transpose()?
+        .or_else(|| file_config.as_ref().map(|c| c.retry.initial_backoff_ms))
+        .unwrap_or(100);
+
+    let retry_max_backoff_ms = retry_max_backoff_ms
+        .map(|s| {
+            s.parse::<u64>().map_err(|e| {
+                RagloomError::from_kind(RagloomErrorKind::InvalidInput)
+                    .with_context(format!("--retry-max-backoff-ms must be integer: {e}"))
+            })
+        })
+        .transpose()?
+        .or_else(|| file_config.as_ref().map(|c| c.retry.max_backoff_ms))
+        .unwrap_or(2_000);
+
+    let retry_policy = RetryPolicy {
+        max_attempts: retry_max_attempts,
+        max_queued_retries: retry_max_queued,
+        initial_backoff: Duration::from_millis(retry_initial_backoff_ms),
+        max_backoff: Duration::from_millis(retry_max_backoff_ms),
+    };
+    retry_policy.validate()?;
+
     Ok(ParsedCommand::Run(Box::new(RunConfig {
         dir,
         embed_backend,
@@ -399,6 +463,10 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         enable_semantic,
         semantic_provider,
         semantic_percentile,
+        retry_max_attempts,
+        retry_max_queued,
+        retry_initial_backoff_ms,
+        retry_max_backoff_ms,
     })))
 }
 
@@ -750,9 +818,16 @@ async fn try_main() -> Result<(), RagloomError> {
         inner: pipeline,
         wal: std::sync::Arc::clone(&wal),
     };
+    let retry_policy = RetryPolicy {
+        max_attempts: cfg.retry_max_attempts,
+        max_queued_retries: cfg.retry_max_queued,
+        initial_backoff: Duration::from_millis(cfg.retry_initial_backoff_ms),
+        max_backoff: Duration::from_millis(cfg.retry_max_backoff_ms),
+    };
+    let summary_for_worker = summary.clone();
 
     let worker = tokio::spawn(async move {
-        run_worker(queue, executor).await;
+        run_worker_with_retry(queue, executor, retry_policy, Some(summary_for_worker)).await;
     });
 
     tokio::signal::ctrl_c().await.map_err(|e| {
@@ -982,6 +1057,10 @@ mod tests {
                 enable_semantic: false,
                 semantic_provider: "adapter".to_string(),
                 semantic_percentile: 95,
+                retry_max_attempts: 3,
+                retry_max_queued: 128,
+                retry_initial_backoff_ms: 100,
+                retry_max_backoff_ms: 2_000,
             }))
         );
     }
@@ -1195,6 +1274,63 @@ mod tests {
     }
 
     #[test]
+    fn parse_args_accepts_retry_policy_flags() {
+        let args = vec![
+            "ragloom".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--embed-url".to_string(),
+            "http://embed".to_string(),
+            "--embed-model".to_string(),
+            "default".to_string(),
+            "--qdrant-url".to_string(),
+            "http://qdrant".to_string(),
+            "--collection".to_string(),
+            "docs".to_string(),
+            "--retry-max-attempts=4".to_string(),
+            "--retry-max-queued".to_string(),
+            "16".to_string(),
+            "--retry-initial-backoff-ms".to_string(),
+            "25".to_string(),
+            "--retry-max-backoff-ms=100".to_string(),
+        ];
+
+        let cfg = parse_args(&args).expect("config");
+        let ParsedCommand::Run(cfg) = cfg else {
+            panic!("expected run config");
+        };
+        assert_eq!(cfg.retry_max_attempts, 4);
+        assert_eq!(cfg.retry_max_queued, 16);
+        assert_eq!(cfg.retry_initial_backoff_ms, 25);
+        assert_eq!(cfg.retry_max_backoff_ms, 100);
+    }
+
+    #[test]
+    fn parse_args_rejects_invalid_retry_policy() {
+        let args = vec![
+            "ragloom".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--embed-url".to_string(),
+            "http://embed".to_string(),
+            "--qdrant-url".to_string(),
+            "http://qdrant".to_string(),
+            "--collection".to_string(),
+            "docs".to_string(),
+            "--retry-max-attempts".to_string(),
+            "0".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("expected invalid retry policy");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(err.to_string().contains("retry.max_attempts"));
+    }
+
+    #[test]
     fn parse_args_rejects_missing_collection_vector_size_value() {
         let args = vec![
             "ragloom".to_string(),
@@ -1274,6 +1410,10 @@ mod tests {
             enable_semantic: false,
             semantic_provider: "adapter".to_string(),
             semantic_percentile: 95,
+            retry_max_attempts: 3,
+            retry_max_queued: 128,
+            retry_initial_backoff_ms: 100,
+            retry_max_backoff_ms: 2_000,
         };
 
         let size = resolve_collection_vector_size(&cfg).expect("vector size");
@@ -1305,6 +1445,10 @@ mod tests {
             enable_semantic: false,
             semantic_provider: "adapter".to_string(),
             semantic_percentile: 95,
+            retry_max_attempts: 3,
+            retry_max_queued: 128,
+            retry_initial_backoff_ms: 100,
+            retry_max_backoff_ms: 2_000,
         };
 
         let size = resolve_collection_vector_size(&cfg).expect("vector size");
@@ -1335,6 +1479,10 @@ mod tests {
             enable_semantic: false,
             semantic_provider: "adapter".to_string(),
             semantic_percentile: 95,
+            retry_max_attempts: 3,
+            retry_max_queued: 128,
+            retry_initial_backoff_ms: 100,
+            retry_max_backoff_ms: 2_000,
         };
 
         let err = resolve_collection_vector_size(&cfg).expect_err("expected config error");
@@ -1372,6 +1520,10 @@ mod tests {
             enable_semantic: false,
             semantic_provider: "adapter".to_string(),
             semantic_percentile: 95,
+            retry_max_attempts: 3,
+            retry_max_queued: 128,
+            retry_initial_backoff_ms: 100,
+            retry_max_backoff_ms: 2_000,
         };
 
         let err = match prepare_startup(&cfg).await {
@@ -1428,6 +1580,10 @@ mod tests {
             enable_semantic: false,
             semantic_provider: "adapter".to_string(),
             semantic_percentile: 95,
+            retry_max_attempts: 3,
+            retry_max_queued: 128,
+            retry_initial_backoff_ms: 100,
+            retry_max_backoff_ms: 2_000,
         };
 
         let sink = QdrantSink::new(QdrantConfig {
@@ -1485,6 +1641,10 @@ mod tests {
             enable_semantic: false,
             semantic_provider: "adapter".to_string(),
             semantic_percentile: 95,
+            retry_max_attempts: 3,
+            retry_max_queued: 128,
+            retry_initial_backoff_ms: 100,
+            retry_max_backoff_ms: 2_000,
         };
 
         let sink = QdrantSink::new(QdrantConfig {
@@ -1530,6 +1690,10 @@ mod tests {
             enable_semantic: false,
             semantic_provider: "adapter".to_string(),
             semantic_percentile: 95,
+            retry_max_attempts: 3,
+            retry_max_queued: 128,
+            retry_initial_backoff_ms: 100,
+            retry_max_backoff_ms: 2_000,
         };
 
         let sink = QdrantSink::new(QdrantConfig {
@@ -1596,6 +1760,11 @@ sink:
   collection: "from-config"
 state:
   path: ".state/from-config.ndjson"
+retry:
+  max_attempts: 5
+  max_queued: 32
+  initial_backoff_ms: 10
+  max_backoff_ms: 80
 "#,
         )
         .expect("write config");
@@ -1616,6 +1785,10 @@ state:
         assert_eq!(cfg.qdrant_url, "http://qdrant-from-config");
         assert_eq!(cfg.collection, "from-config");
         assert_eq!(cfg.state_path, ".state/from-config.ndjson");
+        assert_eq!(cfg.retry_max_attempts, 5);
+        assert_eq!(cfg.retry_max_queued, 32);
+        assert_eq!(cfg.retry_initial_backoff_ms, 10);
+        assert_eq!(cfg.retry_max_backoff_ms, 80);
         assert_eq!(
             cfg.embed_backend,
             EmbedBackend::Http {

@@ -73,19 +73,17 @@ impl FileTailer {
     /// Marks a completed scan and emits deletes for previously seen paths that
     /// were absent from that scan.
     pub fn complete_scan(&mut self, observed_paths: &HashSet<String>) {
-        let mut deleted_paths: Vec<String> = self
-            .last_seen_version
-            .keys()
-            .filter(|path| !observed_paths.contains(*path))
-            .cloned()
-            .collect();
-        deleted_paths.sort();
-
-        for canonical_path in deleted_paths {
-            self.last_seen_version.remove(&canonical_path);
-            self.pending
-                .push(SourceEvent::FileDeleted { canonical_path });
-        }
+        let pending = &mut self.pending;
+        self.last_seen_version.retain(|canonical_path, _| {
+            if observed_paths.contains(canonical_path) {
+                true
+            } else {
+                pending.push(SourceEvent::FileDeleted {
+                    canonical_path: canonical_path.clone(),
+                });
+                false
+            }
+        });
     }
 
     /// Drains pending discovery events.

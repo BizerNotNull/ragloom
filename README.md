@@ -38,12 +38,13 @@ Supported today:
 - Qdrant sink
 - deterministic point IDs
 - persistent local WAL state
+- bounded in-process retry for transient ingest failures
 - pretty and JSON structured logs
 
 Not supported yet:
 
 - PDF or DOCX parsing
-- production retry or dead-letter queues
+- persistent dead-letter queues
 - built-in collection lifecycle management
 
 ## Quickstart
@@ -188,6 +189,12 @@ sink:
 
 state:
   path: ".ragloom/wal.ndjson"
+
+retry:
+  max_attempts: 3
+  max_queued: 128
+  initial_backoff_ms: 100
+  max_backoff_ms: 2000
 ```
 
 Run with:
@@ -213,10 +220,34 @@ ragloom --config ./ragloom.yaml --embed-backend http --embed-model default
 
 - `--config` can provide `source.root`, `embed.endpoint`, `sink.qdrant_url`, and `sink.collection`
 - `--config` can also provide `state.path`; the CLI flag is `--state-path`
+- `--config` can provide `retry.max_attempts`, `retry.max_queued`, `retry.initial_backoff_ms`, and `retry.max_backoff_ms`
 - backend-specific auth still comes from CLI flags, such as `--openai-api-key`
 - chunker settings are currently configured by CLI flags, not by YAML
 - flags support both `--flag value` and `--flag=value`
 - the config file is merged with CLI flags; CLI flags take precedence
+
+### Retry behavior
+
+Ragloom retries transient loader I/O, embedding, and sink failures inside the
+worker before marking a file version failed for the ingest window. Configuration
+and invalid-input errors are not retried.
+
+Defaults:
+
+- `max_attempts: 3`
+- `max_queued: 128`
+- `initial_backoff_ms: 100`
+- `max_backoff_ms: 2000`
+
+CLI overrides:
+
+- `--retry-max-attempts <n>`
+- `--retry-max-queued <n>`
+- `--retry-initial-backoff-ms <ms>`
+- `--retry-max-backoff-ms <ms>`
+
+Set `--retry-max-attempts 1` to disable retries. Backoff is deterministic and
+jitter-free so tests and local runs remain reproducible.
 
 ### Source scanning behavior
 
@@ -279,6 +310,10 @@ The WAL is newline-delimited JSON and records planned `WorkItemV2` entries plus
 have a matching acknowledgement and seeds planner de-duplication from the WAL so
 already acknowledged file versions are not planned again. Corrupt or unreadable
 state files fail startup with a `state` error instead of being ignored.
+
+Retries are not persisted as separate WAL records. If the process stops while
+retries are queued, unacknowledged work is replayed from the WAL on the next
+startup.
 
 ## Architecture
 
@@ -417,8 +452,8 @@ Status: shipped in `v0.1.1`.
 ### v0.2 - More reliable daemon behavior
 
 - persistent local state (shipped on `main`)
+- bounded retry queue (shipped on `main`)
 - delete detection (shipped on `main`)
-- retry queue
 - health endpoint
 - metrics endpoint
 
@@ -521,7 +556,7 @@ curl https://api.openai.com/v1/embeddings \
 - only Qdrant as a built-in sink
 - only UTF-8 file loading
 - no general collection lifecycle management beyond optional first-run bootstrap
-- no production retry queue yet
+- no persistent dead-letter queue yet
 
 ## Contributing
 

@@ -5,7 +5,7 @@
 //! us replay un-acked work after crashes without requiring complex distributed
 //! coordination.
 
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::{RagloomError, RagloomErrorKind};
@@ -166,6 +166,8 @@ impl WalStore for FileWal {
                 .with_context("failed to encode WAL record")
         })?;
 
+        // Keep append durability simple and explicit: one record, one sync.
+        // This favors crash recovery over throughput for the current local WAL.
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -211,9 +213,19 @@ impl WalStore for FileWal {
     }
 
     fn is_empty(&self) -> bool {
-        self.read_all()
-            .map(|records| records.is_empty())
-            .unwrap_or(false)
+        match std::fs::metadata(&self.path) {
+            Ok(metadata) => metadata.len() == 0,
+            Err(err) if err.kind() == ErrorKind::NotFound => true,
+            Err(err) => {
+                tracing::warn!(
+                    event.name = "ragloom.wal.metadata_failed",
+                    path = %self.path.display(),
+                    error.message = %err,
+                    "ragloom.wal.metadata_failed"
+                );
+                false
+            }
+        }
     }
 }
 
@@ -221,9 +233,9 @@ impl WalStore for FileWal {
 pub fn unacked_work_items(records: &[WalRecord]) -> Vec<WalRecord> {
     let mut acked_chunks = std::collections::HashSet::<[u8; 32]>::new();
     let mut acked_files = std::collections::HashSet::<crate::ids::FileFingerprint>::new();
-    let mut acked_deletes = std::collections::HashSet::<String>::new();
+    let mut pending_deletes = std::collections::HashMap::<String, (usize, WalRecord)>::new();
 
-    for record in records {
+    for (idx, record) in records.iter().enumerate() {
         match record {
             WalRecord::SinkAck { chunk_id } => {
                 acked_chunks.insert(*chunk_id);
@@ -231,32 +243,32 @@ pub fn unacked_work_items(records: &[WalRecord]) -> Vec<WalRecord> {
             WalRecord::SinkAckV2 { fingerprint } => {
                 acked_files.insert(fingerprint.clone());
             }
-            WalRecord::DeleteAck { canonical_path } => {
-                acked_deletes.insert(canonical_path.clone());
+            WalRecord::DeleteDocument { canonical_path } => {
+                pending_deletes.insert(canonical_path.clone(), (idx, record.clone()));
             }
-            WalRecord::WorkItem { .. }
-            | WalRecord::WorkItemV2 { .. }
-            | WalRecord::DeleteDocument { .. } => {}
+            WalRecord::DeleteAck { canonical_path } => {
+                pending_deletes.remove(canonical_path);
+            }
+            WalRecord::WorkItem { .. } | WalRecord::WorkItemV2 { .. } => {}
         }
     }
 
-    records
+    let mut unacked = records
         .iter()
-        .filter_map(|record| match record {
+        .enumerate()
+        .filter_map(|(idx, record)| match record {
             WalRecord::WorkItem { chunk_id } if !acked_chunks.contains(chunk_id) => {
-                Some(record.clone())
+                Some((idx, record.clone()))
             }
             WalRecord::WorkItemV2 { fingerprint } if !acked_files.contains(fingerprint) => {
-                Some(record.clone())
-            }
-            WalRecord::DeleteDocument { canonical_path }
-                if !acked_deletes.contains(canonical_path) =>
-            {
-                Some(record.clone())
+                Some((idx, record.clone()))
             }
             _ => None,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    unacked.extend(pending_deletes.into_values());
+    unacked.sort_by_key(|(idx, _)| *idx);
+    unacked.into_iter().map(|(_, record)| record).collect()
 }
 
 #[cfg(test)]
@@ -426,6 +438,28 @@ mod tests {
     }
 
     #[test]
+    fn unacked_work_items_keeps_later_delete_after_prior_delete_ack() {
+        let records = vec![
+            WalRecord::DeleteDocument {
+                canonical_path: "/x/a.txt".to_string(),
+            },
+            WalRecord::DeleteAck {
+                canonical_path: "/x/a.txt".to_string(),
+            },
+            WalRecord::DeleteDocument {
+                canonical_path: "/x/a.txt".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            unacked_work_items(&records),
+            vec![WalRecord::DeleteDocument {
+                canonical_path: "/x/a.txt".to_string()
+            }]
+        );
+    }
+
+    #[test]
     fn file_wal_reports_invalid_state_with_context() {
         let mut file = NamedTempFile::new().expect("temp wal");
         file.write_all(b"{not json}\n").expect("write");
@@ -435,5 +469,28 @@ mod tests {
         assert!(err.to_string().contains("failed to validate WAL file"));
         let source = std::error::Error::source(&err).expect("source");
         assert!(source.to_string().contains("failed to parse WAL record"));
+    }
+
+    #[test]
+    fn file_wal_is_empty_uses_file_metadata_without_parsing() {
+        let mut file = NamedTempFile::new().expect("temp wal");
+        let wal = FileWal {
+            path: file.path().to_path_buf(),
+        };
+        assert!(wal.is_empty());
+
+        file.write_all(b"{not json}\n")
+            .expect("write invalid content");
+        assert!(!wal.is_empty());
+    }
+
+    #[test]
+    fn file_wal_reports_missing_file_as_empty() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let wal = FileWal {
+            path: dir.path().join("missing.ndjson"),
+        };
+
+        assert!(wal.is_empty());
     }
 }

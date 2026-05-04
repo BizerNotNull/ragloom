@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use crate::source::FileVersionDiscovered;
-use crate::state::wal::{WalRecord, WalStore};
+use crate::state::wal::{WalRecord, WalStore, unacked_work_items};
 
 use crate::error::RagloomError;
 
@@ -41,11 +41,10 @@ impl Planner {
                 WalRecord::DeleteDocument { .. } | WalRecord::DeleteAck { .. } => None,
             })
             .collect();
-        let planned_deletes = records
+        let planned_deletes = unacked_work_items(records)
             .iter()
             .filter_map(|record| match record {
-                WalRecord::DeleteDocument { canonical_path }
-                | WalRecord::DeleteAck { canonical_path } => Some(canonical_path.clone()),
+                WalRecord::DeleteDocument { canonical_path } => Some(canonical_path.clone()),
                 _ => None,
             })
             .collect();
@@ -65,6 +64,9 @@ impl Planner {
         discovered: &FileVersionDiscovered,
         wal: &std::sync::Arc<tokio::sync::Mutex<impl WalStore>>,
     ) -> Result<(), RagloomError> {
+        self.planned_deletes
+            .remove(&discovered.fingerprint.canonical_path);
+
         if !self.planned_versions.insert(discovered.file_version_id) {
             return Ok(());
         }
@@ -187,6 +189,72 @@ mod tests {
         planner
             .plan_file_delete("/x/a.txt", &wal)
             .expect("plan delete again");
+
+        let records = wal.try_lock().expect("wal").read_all().expect("read all");
+        assert_eq!(
+            records,
+            vec![WalRecord::DeleteDocument {
+                canonical_path: "/x/a.txt".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn planner_allows_delete_after_path_is_recreated() {
+        let mut planner = Planner::new();
+        let wal = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::state::wal::InMemoryWal::new(),
+        ));
+
+        planner
+            .plan_file_delete("/x/a.txt", &wal)
+            .expect("first delete");
+
+        let mut recreated = discovered([8u8; 32]);
+        recreated.fingerprint.mtime_unix_secs = 101;
+        planner
+            .plan_file_version(&recreated, &wal)
+            .expect("recreated file");
+
+        planner
+            .plan_file_delete("/x/a.txt", &wal)
+            .expect("second delete");
+
+        let records = wal.try_lock().expect("wal").read_all().expect("read all");
+        assert_eq!(
+            records,
+            vec![
+                WalRecord::DeleteDocument {
+                    canonical_path: "/x/a.txt".to_string()
+                },
+                WalRecord::WorkItemV2 {
+                    fingerprint: recreated.fingerprint
+                },
+                WalRecord::DeleteDocument {
+                    canonical_path: "/x/a.txt".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn planner_seeds_only_unacked_deletes_from_wal() {
+        let records = vec![
+            WalRecord::DeleteDocument {
+                canonical_path: "/x/a.txt".to_string(),
+            },
+            WalRecord::DeleteAck {
+                canonical_path: "/x/a.txt".to_string(),
+            },
+        ];
+        let mut planner = Planner::from_wal_records(&records);
+        let wal = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::state::wal::InMemoryWal::new(),
+        ));
+
+        planner
+            .plan_file_delete("/x/a.txt", &wal)
+            .expect("new delete after acknowledged history");
 
         let records = wal.try_lock().expect("wal").read_all().expect("read all");
         assert_eq!(
