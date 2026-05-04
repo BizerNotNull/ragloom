@@ -10,6 +10,8 @@ use crate::pipeline::planner::Planner;
 use crate::source::Source;
 use crate::state::wal::{InMemoryWal, WalRecord, WalStore, unacked_work_items};
 
+use std::collections::VecDeque;
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct IngestionSummarySnapshot {
     discovered_files: u64,
@@ -326,7 +328,92 @@ pub type WorkQueue = tokio::sync::mpsc::Receiver<WalRecord>;
 /// The worker loop should be testable without real embedding/sink I/O.
 #[async_trait::async_trait]
 pub trait WorkExecutor: Send + Sync + 'static {
-    async fn execute(&self, record: WalRecord);
+    async fn execute(&self, record: WalRecord) -> Result<(), RagloomError>;
+}
+
+/// Bounded retry behavior for transient ingest failures.
+///
+/// # Why
+/// Retry policy is an operational concern of the worker loop. Keeping it here
+/// avoids coupling document loading, embedding clients, and sinks to scheduling
+/// while preserving deterministic point IDs and WAL ack semantics.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct RetryPolicy {
+    pub max_attempts: u32,
+    pub max_queued_retries: usize,
+    pub initial_backoff: std::time::Duration,
+    pub max_backoff: std::time::Duration,
+}
+
+impl RetryPolicy {
+    pub fn disabled() -> Self {
+        Self {
+            max_attempts: 1,
+            max_queued_retries: 0,
+            initial_backoff: std::time::Duration::ZERO,
+            max_backoff: std::time::Duration::ZERO,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), RagloomError> {
+        if self.max_attempts == 0 {
+            return Err(RagloomError::from_kind(RagloomErrorKind::Config)
+                .with_context("retry.max_attempts must be at least 1"));
+        }
+        if self.max_attempts > 1 && self.max_queued_retries == 0 {
+            return Err(
+                RagloomError::from_kind(RagloomErrorKind::Config).with_context(
+                    "retry.max_queued_retries must be at least 1 when retries are enabled",
+                ),
+            );
+        }
+        if self.max_backoff < self.initial_backoff {
+            return Err(RagloomError::from_kind(RagloomErrorKind::Config)
+                .with_context("retry.max_backoff_ms must be >= retry.initial_backoff_ms"));
+        }
+        Ok(())
+    }
+
+    fn should_retry(&self, err: &RagloomError, attempt: u32) -> bool {
+        attempt < self.max_attempts && is_retryable_error_kind(err.kind)
+    }
+
+    fn delay_before_attempt(&self, next_attempt: u32) -> std::time::Duration {
+        if self.initial_backoff.is_zero() || next_attempt <= 1 {
+            return std::time::Duration::ZERO;
+        }
+
+        let exponent = next_attempt.saturating_sub(2).min(31);
+        let multiplier = 1_u32.checked_shl(exponent).unwrap_or(u32::MAX);
+        self.initial_backoff
+            .saturating_mul(multiplier)
+            .min(self.max_backoff)
+    }
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            max_queued_retries: 128,
+            initial_backoff: std::time::Duration::from_millis(100),
+            max_backoff: std::time::Duration::from_secs(2),
+        }
+    }
+}
+
+fn is_retryable_error_kind(kind: RagloomErrorKind) -> bool {
+    matches!(
+        kind,
+        RagloomErrorKind::Io | RagloomErrorKind::Embed | RagloomErrorKind::Sink
+    )
+}
+
+#[derive(Debug)]
+struct RetryItem {
+    record: WalRecord,
+    attempt: u32,
+    delay: std::time::Duration,
 }
 
 /// Runs a worker loop that processes all work items until the queue closes.
@@ -335,7 +422,62 @@ pub trait WorkExecutor: Send + Sync + 'static {
 /// This is the smallest possible boundary between concurrency (queue) and
 /// processing (executor), making backpressure and shutdown behavior easy to test.
 pub async fn run_worker(mut queue: WorkQueue, executor: impl WorkExecutor) {
-    while let Some(record) = queue.recv().await {
+    run_worker_with_retry_inner(&mut queue, executor, RetryPolicy::disabled(), None).await;
+}
+
+/// Runs a worker loop with a bounded in-process retry queue.
+///
+/// # Why
+/// Transient filesystem, embedding, and sink failures should get a small,
+/// deterministic recovery window without changing WAL identity or introducing
+/// a durable dead-letter system.
+pub async fn run_worker_with_retry(
+    mut queue: WorkQueue,
+    executor: impl WorkExecutor,
+    policy: RetryPolicy,
+    summary: Option<IngestionSummary>,
+) {
+    if let Err(err) = policy.validate() {
+        tracing::error!(
+            event.name = "ragloom.retry.invalid_policy",
+            error.kind = %err.kind,
+            error.message = %err,
+            "ragloom.retry.invalid_policy"
+        );
+        return;
+    }
+    run_worker_with_retry_inner(&mut queue, executor, policy, summary).await;
+}
+
+async fn run_worker_with_retry_inner(
+    queue: &mut WorkQueue,
+    executor: impl WorkExecutor,
+    policy: RetryPolicy,
+    summary: Option<IngestionSummary>,
+) {
+    let mut retries = VecDeque::<RetryItem>::new();
+
+    loop {
+        let item = if let Some(item) = retries.pop_front() {
+            Some(item)
+        } else {
+            queue.recv().await.map(|record| RetryItem {
+                record,
+                attempt: 1,
+                delay: std::time::Duration::ZERO,
+            })
+        };
+
+        let Some(item) = item else {
+            break;
+        };
+
+        if !item.delay.is_zero() {
+            tokio::time::sleep(item.delay).await;
+        }
+
+        let record = item.record;
+        let attempt = item.attempt;
         let record_type = match &record {
             WalRecord::WorkItem { .. } => "work_item",
             WalRecord::WorkItemV2 { .. } => "work_item_v2",
@@ -343,17 +485,63 @@ pub async fn run_worker(mut queue: WorkQueue, executor: impl WorkExecutor) {
             WalRecord::SinkAckV2 { .. } => "sink_ack_v2",
         };
         let canonical_path = match &record {
-            WalRecord::WorkItemV2 { fingerprint } => Some(fingerprint.canonical_path.as_str()),
+            WalRecord::WorkItemV2 { fingerprint } => Some(fingerprint.canonical_path.clone()),
             _ => None,
         };
+        let canonical_path = canonical_path.as_deref();
 
         tracing::info_span!(
             "ragloom.worker.execute",
             record_type,
-            canonical_path = canonical_path
+            canonical_path = canonical_path,
+            retry.attempt = attempt,
+            retry.max_attempts = policy.max_attempts,
         )
-        .in_scope(|| executor.execute(record))
-        .await;
+        .in_scope(|| executor.execute(record.clone()))
+        .await
+        .map_or_else(
+            |err| {
+                if policy.should_retry(&err, attempt) && retries.len() < policy.max_queued_retries {
+                    let next_attempt = attempt + 1;
+                    let delay = policy.delay_before_attempt(next_attempt);
+                    tracing::warn!(
+                        event.name = "ragloom.retry.scheduled",
+                        record_type,
+                        canonical_path = canonical_path,
+                        retry.attempt = attempt,
+                        retry.next_attempt = next_attempt,
+                        retry.max_attempts = policy.max_attempts,
+                        retry.backoff_ms = delay.as_millis() as u64,
+                        retry.queue_len = retries.len() + 1,
+                        retry.max_queued_retries = policy.max_queued_retries,
+                        error.kind = %err.kind,
+                        error.message = %err,
+                        "ragloom.retry.scheduled"
+                    );
+                    retries.push_back(RetryItem {
+                        record,
+                        attempt: next_attempt,
+                        delay,
+                    });
+                } else {
+                    if let Some(summary) = &summary {
+                        summary.record_failure();
+                    }
+                    tracing::warn!(
+                        event.name = "ragloom.ingest.failed",
+                        record_type,
+                        canonical_path = canonical_path,
+                        retry.attempt = attempt,
+                        retry.max_attempts = policy.max_attempts,
+                        retry.queue_len = retries.len(),
+                        error.kind = %err.kind,
+                        error.message = %err,
+                        "ragloom.ingest.failed"
+                    );
+                }
+            },
+            |_| {},
+        );
     }
 }
 
@@ -539,7 +727,7 @@ impl PipelineExecutor {
 
 #[async_trait::async_trait]
 impl WorkExecutor for PipelineExecutor {
-    async fn execute(&self, record: WalRecord) {
+    async fn execute(&self, record: WalRecord) -> Result<(), RagloomError> {
         match record {
             WalRecord::WorkItemV2 { fingerprint } => {
                 let elapsed_total = std::time::Instant::now();
@@ -562,41 +750,32 @@ impl WorkExecutor for PipelineExecutor {
                             text
                         }
                         Err(err) => {
-                            if let Some(summary) = &self.summary {
-                                summary.record_failure();
-                            }
                             tracing::warn!(
                                 canonical_path = fingerprint.canonical_path.as_str(),
                                 error.kind = %err.kind.to_string(),
                                 error.message = %err,
                                 "ragloom.doc.load_utf8"
                             );
-                            return;
+                            return Err(err);
                         }
                     };
 
                     let points = match self.build_points_from_text(&fingerprint, &text).await {
                         Ok(points) => points,
                         Err(err) => {
-                            if let Some(summary) = &self.summary {
-                                summary.record_failure();
-                            }
                             tracing::warn!(
                                 canonical_path = fingerprint.canonical_path.as_str(),
                                 error.kind = %err.kind.to_string(),
                                 error.message = %err,
                                 "ragloom.embed.request"
                             );
-                            return;
+                            return Err(err);
                         }
                     };
 
                     let point_count = points.len();
 
                     if let Err(err) = self.sink.upsert_points(points).await {
-                        if let Some(summary) = &self.summary {
-                            summary.record_failure();
-                        }
                         tracing::warn!(
                             canonical_path = fingerprint.canonical_path.as_str(),
                             point_count,
@@ -604,7 +783,7 @@ impl WorkExecutor for PipelineExecutor {
                             error.message = %err,
                             "ragloom.sink.upsert"
                         );
-                        return;
+                        return Err(err);
                     }
 
                     if let Some(summary) = &self.summary {
@@ -616,17 +795,21 @@ impl WorkExecutor for PipelineExecutor {
                         elapsed_ms_total = elapsed_total.elapsed().as_millis() as u64,
                         "ragloom.ingest.success"
                     );
+                    Ok(())
                 })
-                .await;
+                .await
             }
             WalRecord::WorkItem { .. } => {
                 // no-op
+                Ok(())
             }
             WalRecord::SinkAck { .. } => {
                 // no-op
+                Ok(())
             }
             WalRecord::SinkAckV2 { .. } => {
                 // no-op
+                Ok(())
             }
         }
     }
@@ -645,7 +828,7 @@ pub struct AckingExecutor<E: WorkExecutor, W: WalStore = InMemoryWal> {
 
 #[async_trait::async_trait]
 impl<E: WorkExecutor, W: WalStore + 'static> WorkExecutor for AckingExecutor<E, W> {
-    async fn execute(&self, record: WalRecord) {
+    async fn execute(&self, record: WalRecord) -> Result<(), RagloomError> {
         let ack = match &record {
             WalRecord::WorkItem { chunk_id } => Some(WalRecord::SinkAck {
                 chunk_id: *chunk_id,
@@ -657,18 +840,21 @@ impl<E: WorkExecutor, W: WalStore + 'static> WorkExecutor for AckingExecutor<E, 
             WalRecord::SinkAckV2 { .. } => None,
         };
 
-        self.inner.execute(record).await;
+        self.inner.execute(record).await?;
 
         if let Some(ack) = ack {
             let mut wal = self.wal.lock().await;
             let elapsed = std::time::Instant::now();
-            wal.append(ack).expect("append ack");
+            wal.append(ack).map_err(|e| {
+                RagloomError::new(e.kind, e).with_context("failed to append sink ack")
+            })?;
             tracing::debug!(
                 ack_type = "sink_ack",
                 elapsed_ms = elapsed.elapsed().as_millis() as u64,
                 "ragloom.wal.append_ack"
             );
         }
+        Ok(())
     }
 }
 
@@ -1658,7 +1844,8 @@ mod tests {
                     mtime_unix_secs: 100,
                 },
             })
-            .await;
+            .await
+            .expect("execute");
 
         let records = wal.lock().await.read_all().expect("read");
         assert!(
@@ -1768,6 +1955,207 @@ mod tests {
         .expect("should execute");
     }
 
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn retry_worker_succeeds_after_transient_failure() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let executor = ScriptedExecutor::new(vec![Err(RagloomErrorKind::Sink), Ok(())]);
+        let attempts = std::sync::Arc::clone(&executor.attempts);
+
+        let worker = tokio::spawn(async move {
+            run_worker_with_retry(
+                rx,
+                executor,
+                RetryPolicy {
+                    max_attempts: 2,
+                    max_queued_retries: 1,
+                    initial_backoff: std::time::Duration::ZERO,
+                    max_backoff: std::time::Duration::ZERO,
+                },
+                None,
+            )
+            .await;
+        });
+
+        tx.send(WalRecord::WorkItemV2 {
+            fingerprint: crate::ids::FileFingerprint {
+                canonical_path: "/x/a.txt".to_string(),
+                size_bytes: 10,
+                mtime_unix_secs: 100,
+            },
+        })
+        .await
+        .expect("send");
+        drop(tx);
+        worker.await.expect("worker");
+
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "transient failure should be retried once"
+        );
+        assert!(logs_contain("ragloom.retry.scheduled"));
+        assert!(logs_contain("retry.next_attempt=2"));
+    }
+
+    #[tokio::test]
+    async fn retry_worker_records_failure_after_exhausting_attempts() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let summary = IngestionSummary::default();
+        summary.record_discovered(1);
+
+        let executor = ScriptedExecutor::new(vec![
+            Err(RagloomErrorKind::Embed),
+            Err(RagloomErrorKind::Embed),
+        ]);
+        let attempts = std::sync::Arc::clone(&executor.attempts);
+        let summary_for_worker = summary.clone();
+
+        let worker = tokio::spawn(async move {
+            run_worker_with_retry(
+                rx,
+                executor,
+                RetryPolicy {
+                    max_attempts: 2,
+                    max_queued_retries: 1,
+                    initial_backoff: std::time::Duration::ZERO,
+                    max_backoff: std::time::Duration::ZERO,
+                },
+                Some(summary_for_worker),
+            )
+            .await;
+        });
+
+        tx.send(WalRecord::WorkItemV2 {
+            fingerprint: crate::ids::FileFingerprint {
+                canonical_path: "/x/a.txt".to_string(),
+                size_bytes: 10,
+                mtime_unix_secs: 100,
+            },
+        })
+        .await
+        .expect("send");
+        drop(tx);
+        worker.await.expect("worker");
+
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let snapshot = summary.snapshot();
+        assert_eq!(snapshot.failed_files, 1);
+        assert_eq!(snapshot.pending_files, 0);
+    }
+
+    #[tokio::test]
+    async fn retry_worker_does_not_retry_non_retryable_error() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let executor = ScriptedExecutor::new(vec![Err(RagloomErrorKind::InvalidInput)]);
+        let attempts = std::sync::Arc::clone(&executor.attempts);
+
+        let worker = tokio::spawn(async move {
+            run_worker_with_retry(
+                rx,
+                executor,
+                RetryPolicy {
+                    max_attempts: 3,
+                    max_queued_retries: 2,
+                    initial_backoff: std::time::Duration::ZERO,
+                    max_backoff: std::time::Duration::ZERO,
+                },
+                None,
+            )
+            .await;
+        });
+
+        tx.send(WalRecord::WorkItemV2 {
+            fingerprint: crate::ids::FileFingerprint {
+                canonical_path: "/x/a.txt".to_string(),
+                size_bytes: 10,
+                mtime_unix_secs: 100,
+            },
+        })
+        .await
+        .expect("send");
+        drop(tx);
+        worker.await.expect("worker");
+
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "invalid input should not be retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_worker_drains_queued_retry_after_input_queue_closes() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let executor = ScriptedExecutor::new(vec![Err(RagloomErrorKind::Io), Ok(())]);
+        let attempts = std::sync::Arc::clone(&executor.attempts);
+
+        let worker = tokio::spawn(async move {
+            run_worker_with_retry(
+                rx,
+                executor,
+                RetryPolicy {
+                    max_attempts: 2,
+                    max_queued_retries: 1,
+                    initial_backoff: std::time::Duration::ZERO,
+                    max_backoff: std::time::Duration::ZERO,
+                },
+                None,
+            )
+            .await;
+        });
+
+        tx.send(WalRecord::WorkItemV2 {
+            fingerprint: crate::ids::FileFingerprint {
+                canonical_path: "/x/a.txt".to_string(),
+                size_bytes: 10,
+                mtime_unix_secs: 100,
+            },
+        })
+        .await
+        .expect("send");
+        drop(tx);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), worker)
+            .await
+            .expect("worker should finish")
+            .expect("worker join");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[derive(Debug, Clone)]
+    struct ScriptedExecutor {
+        outcomes: std::sync::Arc<std::sync::Mutex<VecDeque<Result<(), RagloomErrorKind>>>>,
+        attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ScriptedExecutor {
+        fn new(outcomes: Vec<Result<(), RagloomErrorKind>>) -> Self {
+            Self {
+                outcomes: std::sync::Arc::new(std::sync::Mutex::new(VecDeque::from(outcomes))),
+                attempts: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkExecutor for ScriptedExecutor {
+        async fn execute(&self, _record: WalRecord) -> Result<(), RagloomError> {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self
+                .outcomes
+                .lock()
+                .expect("lock outcomes")
+                .pop_front()
+                .unwrap_or(Ok(()))
+            {
+                Ok(()) => Ok(()),
+                Err(kind) => Err(RagloomError::from_kind(kind).with_context("scripted failure")),
+            }
+        }
+    }
+
     #[derive(Debug, Clone)]
     struct FakeExecutor {
         seen: std::sync::Arc<tokio::sync::Mutex<Vec<crate::ids::FileFingerprint>>>,
@@ -1775,10 +2163,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WorkExecutor for FakeExecutor {
-        async fn execute(&self, record: WalRecord) {
+        async fn execute(&self, record: WalRecord) -> Result<(), RagloomError> {
             if let WalRecord::WorkItemV2 { fingerprint } = record {
                 self.seen.lock().await.push(fingerprint);
             }
+            Ok(())
         }
     }
 
@@ -1789,8 +2178,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WorkExecutor for RecordingExecutor {
-        async fn execute(&self, record: WalRecord) {
+        async fn execute(&self, record: WalRecord) -> Result<(), RagloomError> {
             self.seen.lock().await.push(record);
+            Ok(())
         }
     }
 }
