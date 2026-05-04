@@ -63,9 +63,10 @@ fn release_workflow_supports_version_dispatch_and_release_notes() {
         "expected release workflow to generate release notes deterministically"
     );
     assert!(
-        workflow_yaml.contains("echo \"release_ref=${GITHUB_SHA}\" >> \"$GITHUB_OUTPUT\"")
+        workflow_yaml.contains("release_ref=\"$(git rev-list -n 1 \"${release_tag}\")\"")
+            && workflow_yaml.contains("echo \"release_ref=${GITHUB_SHA}\" >> \"$GITHUB_OUTPUT\"")
             && !workflow_yaml.contains("echo \"release_ref=${GITHUB_REF}\" >> \"$GITHUB_OUTPUT\""),
-        "expected release workflow to pin release_ref to the resolved commit SHA for both tag pushes and workflow_dispatch runs"
+        "expected release workflow to reuse an existing tag commit or pin release_ref to the resolved commit SHA"
     );
 }
 

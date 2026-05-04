@@ -53,10 +53,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "release_ref=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          release_tag="${{ steps.verify.outputs.tag }}"
+          if git rev-parse --verify --quiet "refs/tags/${release_tag}" >/dev/null; then
+            release_ref="$(git rev-list -n 1 "${release_tag}")"
+            echo "release_ref=${release_ref}" >> "$GITHUB_OUTPUT"
+            echo "create_tag=false" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "release_ref=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
             echo "create_tag=true" >> "$GITHUB_OUTPUT"
           else
+            echo "release_ref=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
             echo "create_tag=false" >> "$GITHUB_OUTPUT"
           fi
 
