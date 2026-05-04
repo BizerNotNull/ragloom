@@ -40,6 +40,7 @@ Supported today:
 - persistent local WAL state
 - bounded in-process retry for transient ingest failures
 - pretty and JSON structured logs
+- opt-in local health endpoint
 
 Not supported yet:
 
@@ -195,6 +196,10 @@ retry:
   max_queued: 128
   initial_backoff_ms: 100
   max_backoff_ms: 2000
+
+# Optional. Omit to keep the health endpoint disabled.
+health:
+  addr: "127.0.0.1:8080"
 ```
 
 Run with:
@@ -221,6 +226,7 @@ ragloom --config ./ragloom.yaml --embed-backend http --embed-model default
 - `--config` can provide `source.root`, `embed.endpoint`, `sink.qdrant_url`, and `sink.collection`
 - `--config` can also provide `state.path`; the CLI flag is `--state-path`
 - `--config` can provide `retry.max_attempts`, `retry.max_queued`, `retry.initial_backoff_ms`, and `retry.max_backoff_ms`
+- `--config` can provide `health.addr`; the CLI flag is `--health-addr`
 - backend-specific auth still comes from CLI flags, such as `--openai-api-key`
 - chunker settings are currently configured by CLI flags, not by YAML
 - flags support both `--flag value` and `--flag=value`
@@ -431,6 +437,47 @@ RAGLOOM_LOG_FORMAT=json RAGLOOM_LOG=info ragloom --config ./ragloom.yaml --opena
 
 Ragloom does not log secrets, API keys, or full document contents.
 
+### Health endpoint
+
+The local health endpoint is disabled by default. Enable it with either:
+
+```bash
+ragloom --config ./ragloom.yaml --health-addr 127.0.0.1:8080 --openai-api-key "$OPENAI_API_KEY"
+```
+
+or:
+
+```yaml
+health:
+  addr: "127.0.0.1:8080"
+```
+
+Query it with:
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+Ready responses return HTTP `200` and a small JSON body with daemon status and
+build/version information:
+
+```json
+{
+  "status": "ready",
+  "ready": true,
+  "version": "0.1.1",
+  "build": {
+    "package": "ragloom",
+    "version": "0.1.1"
+  }
+}
+```
+
+Startup/bootstrap failures and fatal runtime-loop failures return HTTP `503`
+with `ready: false` and a short `reason` such as `startup_failed` or
+`runtime_failed`. The endpoint does not include document text, API keys, or
+full local paths.
+
 For first-run validation, look for `ragloom.ingest.summary`. Ragloom emits it after an ingest window goes idle and again on shutdown when there is still unreported work. The summary stays structured and includes counters such as:
 
 - `discovered_files`
@@ -454,7 +501,7 @@ Status: shipped in `v0.1.1`.
 - persistent local state (shipped on `main`)
 - bounded retry queue (shipped on `main`)
 - delete detection (shipped on `main`)
-- health endpoint
+- health endpoint (shipped on `main`)
 - metrics endpoint
 
 ### v0.3 - More document coverage

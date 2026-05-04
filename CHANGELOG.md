@@ -14,6 +14,8 @@
   `doc_id`.
 - Bounded in-process retry queue for transient loader I/O, embedding, and sink
   failures, configurable with `retry.*` YAML keys or `--retry-*` CLI flags.
+- Opt-in local health endpoint, configurable with `health.addr` or
+  `--health-addr`, returning minimal daemon status and build/version JSON.
 
 ### Notes
 - The WAL format is append-only newline-delimited JSON. Corrupt or unreadable
@@ -25,6 +27,9 @@
 - Retries are deterministic and jitter-free. Configuration and invalid-input
   errors are not retried, and exhausted retries are counted in
   `ragloom.ingest.summary` failures.
+- The health endpoint is disabled by default and only exposes readiness,
+  version, and build metadata. Startup/bootstrap failures and fatal runtime-loop
+  failures report `ready: false`.
 
 ## [0.1.0] - 2026-05-01
 
