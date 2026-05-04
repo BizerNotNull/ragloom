@@ -8,11 +8,16 @@
 - Startup replay for unacknowledged `WorkItemV2` records, with acknowledged file
   versions seeded into planner de-duplication to avoid re-emitting completed
   work after restart.
+- Bounded in-process retry queue for transient loader I/O, embedding, and sink
+  failures, configurable with `retry.*` YAML keys or `--retry-*` CLI flags.
 
 ### Notes
 - The WAL format is append-only newline-delimited JSON. Corrupt or unreadable
   state files fail startup with a `state` error so operators can inspect or
   replace the file intentionally.
+- Retries are deterministic and jitter-free. Configuration and invalid-input
+  errors are not retried, and exhausted retries are counted in
+  `ragloom.ingest.summary` failures.
 
 ## [0.1.0] - 2026-05-01
 
