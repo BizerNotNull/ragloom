@@ -452,6 +452,10 @@ health:
   addr: "127.0.0.1:8080"
 ```
 
+The address must be an IP socket address on a loopback interface, such as
+`127.0.0.1:8080` or `[::1]:8080`. Ragloom rejects non-loopback addresses to
+avoid accidentally exposing the operator endpoint outside the local machine.
+
 Query it with:
 
 ```bash

@@ -153,6 +153,7 @@ pub struct HealthServer {
 
 impl HealthServer {
     pub async fn bind(addr: &str, state: HealthState) -> Result<Self, RagloomError> {
+        let addr = parse_loopback_addr(addr)?;
         let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
             RagloomError::new(RagloomErrorKind::Io, e)
                 .with_context(format!("failed to bind health endpoint: {addr}"))
@@ -207,6 +208,19 @@ impl HealthServer {
     }
 }
 
+fn parse_loopback_addr(addr: &str) -> Result<std::net::SocketAddr, RagloomError> {
+    let addr = addr.parse::<std::net::SocketAddr>().map_err(|e| {
+        RagloomError::new(RagloomErrorKind::Config, e).with_context(
+            "health endpoint address must be an IP socket address, such as 127.0.0.1:8080",
+        )
+    })?;
+    if !addr.ip().is_loopback() {
+        return Err(RagloomError::from_kind(RagloomErrorKind::Config)
+            .with_context("health endpoint address must use a loopback IP address"));
+    }
+    Ok(addr)
+}
+
 async fn handle_connection(
     mut stream: tokio::net::TcpStream,
     state: HealthState,
@@ -240,11 +254,21 @@ async fn handle_connection(
             } else {
                 "Service Unavailable"
             };
-            (
-                status,
-                reason,
-                serde_json::to_string(&response).expect("health response serializes"),
-            )
+            match serde_json::to_string(&response) {
+                Ok(body) => (status, reason, body),
+                Err(err) => {
+                    tracing::error!(
+                        event.name = "ragloom.health.serialize_failed",
+                        error = %err,
+                        "ragloom.health.serialize_failed"
+                    );
+                    (
+                        500,
+                        "Internal Server Error",
+                        r#"{"error":"health_response_serialize_failed"}"#.to_string(),
+                    )
+                }
+            }
         }
         ("GET", _) => (404, "Not Found", r#"{"error":"not_found"}"#.to_string()),
         _ => (
@@ -373,5 +397,25 @@ mod tests {
             result.is_err() || result.expect("connect result").is_err(),
             "server should stop accepting connections"
         );
+    }
+
+    #[tokio::test]
+    async fn health_server_rejects_non_loopback_addresses() {
+        let err = HealthServer::bind("0.0.0.0:0", HealthState::starting())
+            .await
+            .expect_err("non-loopback bind should fail");
+
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(err.to_string().contains("loopback"));
+    }
+
+    #[tokio::test]
+    async fn health_server_rejects_non_socket_addresses() {
+        let err = HealthServer::bind("localhost:0", HealthState::starting())
+            .await
+            .expect_err("hostname bind should fail");
+
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(err.to_string().contains("IP socket address"));
     }
 }

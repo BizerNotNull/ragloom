@@ -848,7 +848,7 @@ async fn try_main() -> Result<(), RagloomError> {
     let (queue, shutdown) = AsyncRuntime::new(runtime, 128)
         .with_summary(summary.clone())
         .start();
-    let shutdown_for_monitor = shutdown.clone();
+    let mut shutdown_for_monitor = shutdown.clone();
 
     let pipeline = PipelineExecutor::with_chunker(
         embedding,
@@ -877,15 +877,8 @@ async fn try_main() -> Result<(), RagloomError> {
     health_state.mark_ready();
     let health_for_monitor = health_state.clone();
     let health_monitor = tokio::spawn(async move {
-        loop {
-            match shutdown_for_monitor.exit_reason() {
-                Some(reason) => {
-                    mark_health_from_runtime_exit(&health_for_monitor, reason);
-                    return;
-                }
-                None if health_for_monitor.is_shutting_down() => return,
-                None => tokio::time::sleep(Duration::from_millis(20)).await,
-            }
+        if let Some(reason) = shutdown_for_monitor.wait_for_exit().await {
+            mark_health_from_runtime_exit(&health_for_monitor, reason);
         }
     });
 
@@ -900,6 +893,7 @@ async fn try_main() -> Result<(), RagloomError> {
         server.shutdown().await;
     }
     let _ = worker.await;
+    health_monitor.abort();
     let _ = health_monitor.await;
     summary.emit_if_dirty("shutdown");
 
