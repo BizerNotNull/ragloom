@@ -316,6 +316,9 @@ The WAL is newline-delimited JSON and records planned `WorkItemV2` entries plus
 have a matching acknowledgement and seeds planner de-duplication from the WAL so
 already acknowledged file versions are not planned again. Corrupt or unreadable
 state files fail startup with a `state` error instead of being ignored.
+Ragloom keeps the WAL append handle open for the lifetime of the process to
+avoid repeated open/close overhead, while still calling `sync_data()` after each
+record so the durability boundary remains one acknowledged append at a time.
 
 Retries are not persisted as separate WAL records. If the process stops while
 retries are queued, unacknowledged work is replayed from the WAL on the next

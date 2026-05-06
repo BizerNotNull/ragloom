@@ -19,6 +19,11 @@
 - Prometheus-compatible `/metrics` endpoint on the same local health listener,
   exposing ingest progress, retry reliability counters, and queue depth gauges.
 
+### Changed
+- `FileWal` now keeps its append handle open across records to avoid repeated
+  open/close overhead on the WAL hot path, while still calling
+  `sync_data()` per append so crash recovery semantics stay unchanged.
+
 ### Notes
 - The WAL format is append-only newline-delimited JSON. Corrupt or unreadable
   state files fail startup with a `state` error so operators can inspect or
