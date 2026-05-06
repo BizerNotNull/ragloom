@@ -15,7 +15,7 @@ use thiserror::Error;
 /// # Why
 /// Callers typically want a single error type to bubble up through layers.
 /// [`RagloomError`] provides that stable surface while still exposing a
-/// machine-readable [`RagloomErrorKind`] and an optional human-readable
+/// machine-readable [`RagloomErrorKind`] and optional human-readable
 /// context layers.
 #[derive(Debug, Error)]
 #[error("{kind}{context}")]
@@ -136,13 +136,13 @@ impl RagloomErrorContext {
         if normalized.is_empty() {
             return;
         }
-        self.0.insert(0, normalized);
+        self.0.push(normalized);
     }
 }
 
 impl std::fmt::Display for RagloomErrorContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut layers = self.0.iter();
+        let mut layers = self.0.iter().rev();
         let Some(first) = layers.next() else {
             return Ok(());
         };
