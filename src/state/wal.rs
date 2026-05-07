@@ -5,6 +5,7 @@
 //! us replay un-acked work after crashes without requiring complex distributed
 //! coordination.
 
+use std::fs::File;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
@@ -114,6 +115,7 @@ impl WalStore for InMemoryWal {
 #[derive(Debug)]
 pub struct FileWal {
     path: PathBuf,
+    file: File,
 }
 
 impl FileWal {
@@ -130,16 +132,10 @@ impl FileWal {
             })?;
         }
 
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|e| {
-                RagloomError::new(RagloomErrorKind::State, e)
-                    .with_context(format!("failed to open WAL file: {}", path.display()))
-            })?;
-
-        let wal = Self { path };
+        let wal = Self {
+            file: open_wal_append_file(&path)?,
+            path,
+        };
         wal.read_all().map_err(|e| {
             RagloomError::new(e.kind, e).with_context("failed to validate WAL file")
         })?;
@@ -166,23 +162,15 @@ impl WalStore for FileWal {
                 .with_context("failed to encode WAL record")
         })?;
 
-        // Keep append durability simple and explicit: one record, one sync.
-        // This favors crash recovery over throughput for the current local WAL.
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(|e| {
-                RagloomError::new(RagloomErrorKind::State, e)
-                    .with_context(format!("failed to open WAL file: {}", self.path.display()))
-            })?;
-        writeln!(file, "{encoded}").map_err(|e| {
+        // Keep one append handle open to avoid per-record open/close overhead,
+        // but still sync every appended record so crash recovery stays explicit.
+        writeln!(self.file, "{encoded}").map_err(|e| {
             RagloomError::new(RagloomErrorKind::State, e).with_context(format!(
                 "failed to append WAL file: {}",
                 self.path.display()
             ))
         })?;
-        file.sync_data().map_err(|e| {
+        self.file.sync_data().map_err(|e| {
             RagloomError::new(RagloomErrorKind::State, e)
                 .with_context(format!("failed to sync WAL file: {}", self.path.display()))
         })?;
@@ -227,6 +215,17 @@ impl WalStore for FileWal {
             }
         }
     }
+}
+
+fn open_wal_append_file(path: &Path) -> Result<File, RagloomError> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| {
+            RagloomError::new(RagloomErrorKind::State, e)
+                .with_context(format!("failed to open WAL file: {}", path.display()))
+        })
 }
 
 /// Returns unacked work in original append order.
@@ -473,24 +472,52 @@ mod tests {
 
     #[test]
     fn file_wal_is_empty_uses_file_metadata_without_parsing() {
-        let mut file = NamedTempFile::new().expect("temp wal");
-        let wal = FileWal {
-            path: file.path().to_path_buf(),
-        };
+        let file = NamedTempFile::new().expect("temp wal");
+        let wal = FileWal::open(file.path()).expect("open");
         assert!(wal.is_empty());
 
-        file.write_all(b"{not json}\n")
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(file.path())
+            .expect("reopen")
+            .write_all(b"{not json}\n")
             .expect("write invalid content");
         assert!(!wal.is_empty());
     }
 
     #[test]
-    fn file_wal_reports_missing_file_as_empty() {
+    fn file_wal_reports_newly_opened_file_as_empty() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let wal = FileWal {
-            path: dir.path().join("missing.ndjson"),
-        };
+        let wal = FileWal::open(dir.path().join("fresh.ndjson")).expect("open");
 
         assert!(wal.is_empty());
+    }
+
+    #[test]
+    fn file_wal_reuses_open_handle_across_multiple_appends() {
+        let file = NamedTempFile::new().expect("temp wal");
+        let path = file.path().to_path_buf();
+
+        let mut wal = FileWal::open(&path).expect("open");
+        wal.append(WalRecord::WorkItem {
+            chunk_id: [1u8; 32],
+        })
+        .expect("append first");
+        wal.append(WalRecord::SinkAck {
+            chunk_id: [1u8; 32],
+        })
+        .expect("append second");
+
+        assert_eq!(
+            wal.read_all().expect("read"),
+            vec![
+                WalRecord::WorkItem {
+                    chunk_id: [1u8; 32]
+                },
+                WalRecord::SinkAck {
+                    chunk_id: [1u8; 32]
+                },
+            ]
+        );
     }
 }
