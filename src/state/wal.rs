@@ -472,25 +472,23 @@ mod tests {
 
     #[test]
     fn file_wal_is_empty_uses_file_metadata_without_parsing() {
-        let mut file = NamedTempFile::new().expect("temp wal");
-        let wal = FileWal {
-            file: open_wal_append_file(file.path()).expect("open"),
-            path: file.path().to_path_buf(),
-        };
+        let file = NamedTempFile::new().expect("temp wal");
+        let wal = FileWal::open(file.path()).expect("open");
         assert!(wal.is_empty());
 
-        file.write_all(b"{not json}\n")
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(file.path())
+            .expect("reopen")
+            .write_all(b"{not json}\n")
             .expect("write invalid content");
         assert!(!wal.is_empty());
     }
 
     #[test]
-    fn file_wal_reports_missing_file_as_empty() {
+    fn file_wal_reports_newly_opened_file_as_empty() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let wal = FileWal {
-            file: open_wal_append_file(&dir.path().join("missing.ndjson")).expect("open"),
-            path: dir.path().join("missing.ndjson"),
-        };
+        let wal = FileWal::open(dir.path().join("fresh.ndjson")).expect("open");
 
         assert!(wal.is_empty());
     }
