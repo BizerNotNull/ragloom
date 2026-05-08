@@ -270,6 +270,31 @@ pub fn unacked_work_items(records: &[WalRecord]) -> Vec<WalRecord> {
     unacked.into_iter().map(|(_, record)| record).collect()
 }
 
+/// Projects the set of canonical paths that were last known to exist.
+///
+/// # Why
+/// The polling source keeps delete detection state in memory. On restart we
+/// rebuild the minimum source-side state from the WAL so the next completed
+/// scan can emit delete work for files removed while Ragloom was offline.
+pub fn known_live_document_paths(records: &[WalRecord]) -> std::collections::HashSet<String> {
+    let mut live_paths = std::collections::HashSet::new();
+
+    for record in records {
+        match record {
+            WalRecord::WorkItemV2 { fingerprint } | WalRecord::SinkAckV2 { fingerprint } => {
+                live_paths.insert(fingerprint.canonical_path.clone());
+            }
+            WalRecord::DeleteDocument { canonical_path }
+            | WalRecord::DeleteAck { canonical_path } => {
+                live_paths.remove(canonical_path);
+            }
+            WalRecord::WorkItem { .. } | WalRecord::SinkAck { .. } => {}
+        }
+    }
+
+    live_paths
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,6 +481,98 @@ mod tests {
                 canonical_path: "/x/a.txt".to_string()
             }]
         );
+    }
+
+    #[test]
+    fn known_live_document_paths_restores_acknowledged_file_as_live() {
+        let records = vec![
+            WalRecord::WorkItemV2 {
+                fingerprint: FileFingerprint {
+                    canonical_path: "/x/a.txt".to_string(),
+                    size_bytes: 10,
+                    mtime_unix_secs: 100,
+                },
+            },
+            WalRecord::SinkAckV2 {
+                fingerprint: FileFingerprint {
+                    canonical_path: "/x/a.txt".to_string(),
+                    size_bytes: 10,
+                    mtime_unix_secs: 100,
+                },
+            },
+        ];
+
+        assert_eq!(
+            known_live_document_paths(&records),
+            std::collections::HashSet::from(["/x/a.txt".to_string()])
+        );
+    }
+
+    #[test]
+    fn known_live_document_paths_removes_path_after_delete() {
+        let records = vec![
+            WalRecord::WorkItemV2 {
+                fingerprint: FileFingerprint {
+                    canonical_path: "/x/a.txt".to_string(),
+                    size_bytes: 10,
+                    mtime_unix_secs: 100,
+                },
+            },
+            WalRecord::DeleteDocument {
+                canonical_path: "/x/a.txt".to_string(),
+            },
+            WalRecord::DeleteAck {
+                canonical_path: "/x/a.txt".to_string(),
+            },
+        ];
+
+        assert!(known_live_document_paths(&records).is_empty());
+    }
+
+    #[test]
+    fn known_live_document_paths_restores_path_after_reingest() {
+        let records = vec![
+            WalRecord::WorkItemV2 {
+                fingerprint: FileFingerprint {
+                    canonical_path: "/x/a.txt".to_string(),
+                    size_bytes: 10,
+                    mtime_unix_secs: 100,
+                },
+            },
+            WalRecord::DeleteAck {
+                canonical_path: "/x/a.txt".to_string(),
+            },
+            WalRecord::WorkItemV2 {
+                fingerprint: FileFingerprint {
+                    canonical_path: "/x/a.txt".to_string(),
+                    size_bytes: 11,
+                    mtime_unix_secs: 101,
+                },
+            },
+        ];
+
+        assert_eq!(
+            known_live_document_paths(&records),
+            std::collections::HashSet::from(["/x/a.txt".to_string()])
+        );
+    }
+
+    #[test]
+    fn known_live_document_paths_keeps_pending_delete_absent() {
+        let records = vec![
+            WalRecord::WorkItemV2 {
+                fingerprint: FileFingerprint {
+                    canonical_path: "/x/a.txt".to_string(),
+                    size_bytes: 10,
+                    mtime_unix_secs: 100,
+                },
+            },
+            WalRecord::DeleteDocument {
+                canonical_path: "/x/a.txt".to_string(),
+            },
+        ];
+
+        assert!(known_live_document_paths(&records).is_empty());
     }
 
     #[test]
