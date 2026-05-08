@@ -59,8 +59,12 @@ fn release_workflow_supports_version_dispatch_and_release_notes() {
         "expected `workflow_dispatch.inputs.version.type` to be `string`"
     );
     assert!(
-        workflow_yaml.contains("generate_release_notes: true"),
-        "expected release workflow to generate release notes deterministically"
+        workflow_yaml.contains("render-release-notes.py")
+            && workflow_yaml.contains("Validate curated release notes")
+            && workflow_yaml.contains("Render curated release notes")
+            && workflow_yaml.contains("body_path: release-notes.md")
+            && !workflow_yaml.contains("generate_release_notes: true"),
+        "expected release workflow to validate a curated changelog entry and publish it as the GitHub Release body"
     );
     assert!(
         workflow_yaml.contains("release_ref=\"$(git rev-list -n 1 \"${release_tag}\")\"")
@@ -167,6 +171,33 @@ fn release_version_verifier_accepts_v_prefixed_manual_version_input() {
         output_lines.contains(&format!("version={version}").as_str())
             && output_lines.contains(&format!("tag=v{version}").as_str()),
         "expected verifier to normalize the version output and derive the release tag"
+    );
+}
+
+#[test]
+fn release_notes_renderer_uses_versioned_changelog_section() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let version = crate_version();
+
+    let output = Command::new("python")
+        .arg(".github/scripts/render-release-notes.py")
+        .current_dir(repo_root)
+        .env("EXPECTED_VERSION", &version)
+        .output()
+        .expect("run release notes renderer with Python");
+
+    assert!(
+        output.status.success(),
+        "expected changelog renderer to succeed for current crate version; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let notes = String::from_utf8(output.stdout).expect("renderer stdout is utf-8");
+    assert!(
+        notes.contains("## Added")
+            && notes.contains("Persistent local WAL state")
+            && !notes.contains("## [Unreleased]"),
+        "expected rendered release notes to come from the versioned changelog section only"
     );
 }
 

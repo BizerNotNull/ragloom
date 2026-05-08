@@ -48,6 +48,11 @@ jobs:
           EXPECTED_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
         run: python .github/scripts/verify-release-version.py
 
+      - name: Validate curated release notes
+        env:
+          EXPECTED_VERSION: ${{ steps.verify.outputs.version }}
+        run: python .github/scripts/render-release-notes.py > /dev/null
+
       - name: Plan release ref
         id: plan
         shell: bash
@@ -99,6 +104,11 @@ jobs:
         with:
           ref: ${{ needs.prepare-release.outputs.release_ref }}
           fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
@@ -291,13 +301,18 @@ jobs:
         with:
           path: release-artifacts
 
+      - name: Render curated release notes
+        env:
+          EXPECTED_VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: python .github/scripts/render-release-notes.py > release-notes.md
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare-release.outputs.tag }}
           name: ${{ needs.prepare-release.outputs.tag }}
           target_commitish: ${{ needs.prepare-release.outputs.release_ref }}
-          generate_release_notes: true
+          body_path: release-notes.md
           files: release-artifacts/**/*
 
   publish-best-effort-release-assets:

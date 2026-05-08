@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-08
+
 ### Added
 - Persistent local WAL state via `FileWal`, stored by default at
   `.ragloom/wal.ndjson` and configurable with `--state-path` or `state.path`.

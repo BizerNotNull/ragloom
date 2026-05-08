@@ -130,12 +130,12 @@ Download the archive for your platform from the GitHub Release page, extract it,
 Examples:
 
 ```bash
-tar -xzf ragloom-v0.1.1-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf ragloom-v0.2.0-x86_64-unknown-linux-gnu.tar.gz
 ./ragloom --version
 ```
 
 ```powershell
-Expand-Archive .\ragloom-v0.1.1-x86_64-pc-windows-msvc.zip -DestinationPath .
+Expand-Archive .\ragloom-v0.2.0-x86_64-pc-windows-msvc.zip -DestinationPath .
 .\ragloom.exe --version
 ```
 
@@ -475,10 +475,10 @@ build/version information:
 {
   "status": "ready",
   "ready": true,
-  "version": "0.1.1",
+  "version": "0.2.0",
   "build": {
     "package": "ragloom",
-    "version": "0.1.1"
+    "version": "0.2.0"
   }
 }
 ```
@@ -534,11 +534,13 @@ Status: shipped in `v0.1.1`.
 
 ### v0.2 - More reliable daemon behavior
 
-- persistent local state (shipped on `main`)
-- bounded retry queue (shipped on `main`)
-- delete detection (shipped on `main`)
-- health endpoint (shipped on `main`)
-- metrics endpoint (shipped on `main`)
+Status: shipped in `v0.2.0`.
+
+- persistent local state
+- bounded retry queue
+- delete detection
+- health endpoint
+- metrics endpoint
 
 ### v0.3 - More document coverage
 

@@ -25,7 +25,13 @@ Ragloom publishes artifacts through:
 
 Maintainers should start releases from `.github/workflows/release.yml` using
 `workflow_dispatch` with an explicit crate version from `Cargo.toml`
-(for example `0.1.1`).
+(for example `0.2.0`).
+
+Before dispatching the workflow, move the relevant notes from
+`CHANGELOG.md` `## [Unreleased]` into a versioned section such as
+`## [0.2.0] - 2026-05-08`. The release workflow validates that the requested
+version already has a curated changelog section and publishes that section as
+the GitHub Release body.
 
 The release workflow verifies that:
 
@@ -38,13 +44,13 @@ Manual `push` of a `v*` tag is still supported, but it goes through the same
 `Cargo.toml` consistency guard before release artifacts or crates.io publish
 steps run.
 
-GitHub Release notes are generated automatically by the release workflow so the
-published notes come from the repository event history rather than ad hoc local
-release text.
+GitHub Release notes are rendered automatically from the matching version
+section in `CHANGELOG.md`, so maintainers prepare the release summary before
+tagging instead of publishing a body assembled only from PR titles.
 
 GitHub Release archives are published with explicit target names such as
-`ragloom-v0.1.1-x86_64-unknown-linux-gnu.tar.gz` and
-`ragloom-v0.1.1-x86_64-pc-windows-msvc.zip`.
+`ragloom-v0.2.0-x86_64-unknown-linux-gnu.tar.gz` and
+`ragloom-v0.2.0-x86_64-pc-windows-msvc.zip`.
 
 Each published archive also includes a matching `.sha256.txt` checksum file and
 `.spdx.json` SBOM. Release checksums are generated with a platform-aware
