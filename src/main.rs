@@ -125,67 +125,73 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
     let mut retry_initial_backoff_ms: Option<String> = None;
     let mut retry_max_backoff_ms: Option<String> = None;
 
-    let mut iter = args.iter().skip(1);
+    let mut iter = args.iter().skip(1).peekable();
     while let Some(arg) = iter.next() {
         let (flag, inline_value) = match arg.split_once('=') {
             Some((k, v)) => (k, Some(v)),
             None => (arg.as_str(), None),
         };
 
-        let mut next_value = || {
-            inline_value
-                .map(str::to_string)
-                .or_else(|| iter.next().cloned())
-        };
-
         match flag {
-            "--config" => config_path = next_value(),
-            "--dir" => dir = next_value(),
+            "--config" => config_path = next_arg_value(inline_value, &mut iter),
+            "--dir" => dir = next_arg_value(inline_value, &mut iter),
 
-            "--embed-backend" => embed_backend = next_value(),
+            "--embed-backend" => embed_backend = next_arg_value(inline_value, &mut iter),
 
-            "--embed-url" => embed_url = next_value(),
-            "--embed-model" => embed_model = next_value(),
+            "--embed-url" => embed_url = next_arg_value(inline_value, &mut iter),
+            "--embed-model" => embed_model = next_arg_value(inline_value, &mut iter),
 
-            "--openai-endpoint" => openai_endpoint = next_value(),
-            "--openai-api-key" => openai_api_key = next_value(),
-            "--openai-model" => openai_model = next_value(),
+            "--openai-endpoint" => openai_endpoint = next_arg_value(inline_value, &mut iter),
+            "--openai-api-key" => openai_api_key = next_arg_value(inline_value, &mut iter),
+            "--openai-model" => openai_model = next_arg_value(inline_value, &mut iter),
 
-            "--qdrant-url" => qdrant_url = next_value(),
-            "--collection" => collection = next_value(),
-            "--state-path" => state_path = next_value(),
-            "--health-addr" => health_addr = next_value(),
+            "--qdrant-url" => qdrant_url = next_arg_value(inline_value, &mut iter),
+            "--collection" => collection = next_arg_value(inline_value, &mut iter),
+            "--state-path" => state_path = next_arg_value(inline_value, &mut iter),
+            "--health-addr" => health_addr = next_arg_value(inline_value, &mut iter),
             "--create-collection-if-missing" => {
-                if inline_value.is_some() {
-                    return Err(cli_invalid_input(
-                        "--create-collection-if-missing does not accept a value",
-                    ));
-                }
+                validate_boolean_flag(
+                    flag,
+                    inline_value,
+                    iter.peek().map(|next_arg| next_arg.as_str()),
+                )?;
                 create_collection_if_missing = true;
             }
             "--collection-vector-size" => {
-                collection_vector_size = Some(next_value().ok_or_else(|| {
-                    cli_invalid_input("missing required value: --collection-vector-size")
-                })?);
+                collection_vector_size =
+                    Some(next_arg_value(inline_value, &mut iter).ok_or_else(|| {
+                        cli_invalid_input("missing required value: --collection-vector-size")
+                    })?);
             }
 
-            "--chunker-strategy" => chunker_strategy = next_value(),
-            "--size-metric" => size_metric = next_value(),
-            "--size-max" => size_max = next_value(),
-            "--size-min" => size_min = next_value(),
-            "--size-overlap" => size_overlap = next_value(),
-            "--tokenizer" => tokenizer = next_value(),
-            "--chunker-mode" => chunker_mode = next_value(),
-            "--chunker-single" => chunker_single = next_value(),
+            "--chunker-strategy" => chunker_strategy = next_arg_value(inline_value, &mut iter),
+            "--size-metric" => size_metric = next_arg_value(inline_value, &mut iter),
+            "--size-max" => size_max = next_arg_value(inline_value, &mut iter),
+            "--size-min" => size_min = next_arg_value(inline_value, &mut iter),
+            "--size-overlap" => size_overlap = next_arg_value(inline_value, &mut iter),
+            "--tokenizer" => tokenizer = next_arg_value(inline_value, &mut iter),
+            "--chunker-mode" => chunker_mode = next_arg_value(inline_value, &mut iter),
+            "--chunker-single" => chunker_single = next_arg_value(inline_value, &mut iter),
             "--enable-semantic" => {
+                validate_boolean_flag(
+                    flag,
+                    inline_value,
+                    iter.peek().map(|next_arg| next_arg.as_str()),
+                )?;
                 enable_semantic = true;
             }
-            "--semantic-provider" => semantic_provider = next_value(),
-            "--semantic-percentile" => semantic_percentile = next_value(),
-            "--retry-max-attempts" => retry_max_attempts = next_value(),
-            "--retry-max-queued" => retry_max_queued = next_value(),
-            "--retry-initial-backoff-ms" => retry_initial_backoff_ms = next_value(),
-            "--retry-max-backoff-ms" => retry_max_backoff_ms = next_value(),
+            "--semantic-provider" => semantic_provider = next_arg_value(inline_value, &mut iter),
+            "--semantic-percentile" => {
+                semantic_percentile = next_arg_value(inline_value, &mut iter)
+            }
+            "--retry-max-attempts" => retry_max_attempts = next_arg_value(inline_value, &mut iter),
+            "--retry-max-queued" => retry_max_queued = next_arg_value(inline_value, &mut iter),
+            "--retry-initial-backoff-ms" => {
+                retry_initial_backoff_ms = next_arg_value(inline_value, &mut iter)
+            }
+            "--retry-max-backoff-ms" => {
+                retry_max_backoff_ms = next_arg_value(inline_value, &mut iter)
+            }
             "--help" | "-h" => return Ok(ParsedCommand::Help),
             "--version" | "-V" => return Ok(ParsedCommand::Version),
             unknown => return Err(cli_invalid_input(format!("unknown flag: {unknown}"))),
@@ -506,6 +512,27 @@ fn cli_invalid_input(message: impl Into<String>) -> RagloomError {
     let message = message.into();
     RagloomError::from_kind(RagloomErrorKind::InvalidInput)
         .with_context(format!("{message}\n{USAGE}"))
+}
+
+fn validate_boolean_flag(
+    flag: &str,
+    inline_value: Option<&str>,
+    next_arg: Option<&str>,
+) -> Result<(), RagloomError> {
+    if inline_value.is_some() || next_arg.is_some_and(|arg| !arg.starts_with('-')) {
+        return Err(cli_invalid_input(format!("{flag} does not accept a value")));
+    }
+
+    Ok(())
+}
+
+fn next_arg_value<'a, I>(inline_value: Option<&str>, iter: &mut I) -> Option<String>
+where
+    I: Iterator<Item = &'a String>,
+{
+    inline_value
+        .map(str::to_string)
+        .or_else(|| iter.next().cloned())
 }
 
 fn cli_config_error(message: impl Into<String>) -> RagloomError {
@@ -1310,6 +1337,61 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("--create-collection-if-missing does not accept a value")
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_inline_value_for_enable_semantic() {
+        let args = vec![
+            "ragloom".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--embed-url".to_string(),
+            "http://embed".to_string(),
+            "--embed-model".to_string(),
+            "default".to_string(),
+            "--qdrant-url".to_string(),
+            "http://qdrant".to_string(),
+            "--collection".to_string(),
+            "docs".to_string(),
+            "--enable-semantic=false".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("expected invalid boolean flag usage");
+        assert_eq!(err.kind, RagloomErrorKind::InvalidInput);
+        assert!(
+            err.to_string()
+                .contains("--enable-semantic does not accept a value")
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_positional_value_for_enable_semantic() {
+        let args = vec![
+            "ragloom".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--embed-url".to_string(),
+            "http://embed".to_string(),
+            "--embed-model".to_string(),
+            "default".to_string(),
+            "--qdrant-url".to_string(),
+            "http://qdrant".to_string(),
+            "--collection".to_string(),
+            "docs".to_string(),
+            "--enable-semantic".to_string(),
+            "false".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("expected invalid boolean flag usage");
+        assert_eq!(err.kind, RagloomErrorKind::InvalidInput);
+        assert!(
+            err.to_string()
+                .contains("--enable-semantic does not accept a value")
         );
     }
 
