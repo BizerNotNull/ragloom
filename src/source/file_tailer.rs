@@ -35,7 +35,7 @@ impl ObservedFileMeta {
 /// from any real filesystem scanning/watching implementation.
 #[derive(Debug, Default)]
 pub struct FileTailer {
-    last_seen_version: HashMap<String, [u8; 32]>,
+    last_seen_version: HashMap<String, Option<[u8; 32]>>,
     pending: Vec<SourceEvent>,
 }
 
@@ -43,6 +43,25 @@ impl FileTailer {
     /// Constructs a new tailer.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Constructs a tailer seeded with previously observed canonical paths.
+    ///
+    /// # Why
+    /// Restart-time delete detection only needs path membership. We seed
+    /// placeholder versions so a first completed scan can emit delete events
+    /// for files removed while the process was offline.
+    pub fn with_previously_observed_paths(
+        canonical_paths: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let last_seen_version = canonical_paths
+            .into_iter()
+            .map(|canonical_path| (canonical_path, None))
+            .collect();
+        Self {
+            last_seen_version,
+            pending: Vec::new(),
+        }
     }
 
     /// Feeds an observation into the tailer.
@@ -56,12 +75,12 @@ impl FileTailer {
         let should_emit = self
             .last_seen_version
             .get(&fingerprint.canonical_path)
-            .map(|existing| existing != &version_id)
+            .map(|existing| existing.as_ref() != Some(&version_id))
             .unwrap_or(true);
 
         if should_emit {
             self.last_seen_version
-                .insert(fingerprint.canonical_path.clone(), version_id);
+                .insert(fingerprint.canonical_path.clone(), Some(version_id));
             self.pending
                 .push(SourceEvent::FileVersionDiscovered(FileVersionDiscovered {
                     fingerprint,
@@ -164,6 +183,49 @@ mod tests {
         );
 
         tailer.complete_scan(&HashSet::new());
+        assert!(tailer.drain().is_empty());
+    }
+
+    #[test]
+    fn seeded_missing_path_emits_delete_on_first_completed_scan() {
+        let mut tailer = FileTailer::with_previously_observed_paths(["/x/a.txt".to_string()]);
+
+        tailer.complete_scan(&HashSet::new());
+
+        assert_eq!(
+            tailer.drain(),
+            vec![SourceEvent::FileDeleted {
+                canonical_path: "/x/a.txt".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn seeded_existing_path_does_not_emit_spurious_delete() {
+        let mut tailer = FileTailer::with_previously_observed_paths(["/x/a.txt".to_string()]);
+        let observed = HashSet::from(["/x/a.txt".to_string()]);
+
+        tailer.complete_scan(&observed);
+
+        assert!(tailer.drain().is_empty());
+    }
+
+    #[test]
+    fn seeded_existing_path_emits_discovery_once_on_first_observe() {
+        let mut tailer = FileTailer::with_previously_observed_paths(["/x/a.txt".to_string()]);
+
+        tailer.observe(ObservedFileMeta {
+            canonical_path: "/x/a.txt".to_string(),
+            size_bytes: 10,
+            mtime_unix_secs: 100,
+        });
+        assert_eq!(tailer.drain().len(), 1);
+
+        tailer.observe(ObservedFileMeta {
+            canonical_path: "/x/a.txt".to_string(),
+            size_bytes: 10,
+            mtime_unix_secs: 100,
+        });
         assert!(tailer.drain().is_empty());
     }
 }

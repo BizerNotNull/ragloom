@@ -31,9 +31,21 @@ impl DirectoryScannerSource {
     /// The scanner is stateful (it must remember previously observed versions)
     /// so construction is explicit and fallible only for invalid inputs.
     pub fn new(root: impl AsRef<Path>) -> Result<Self, std::io::Error> {
+        Self::with_previously_observed_paths(root, HashSet::new())
+    }
+
+    /// Creates a scanner seeded with previously observed canonical paths.
+    ///
+    /// # Why
+    /// Seeding source state from the WAL lets delete detection survive process
+    /// restarts without introducing another persistent state file.
+    pub fn with_previously_observed_paths(
+        root: impl AsRef<Path>,
+        canonical_paths: HashSet<String>,
+    ) -> Result<Self, std::io::Error> {
         Ok(Self {
             root: root.as_ref().to_path_buf(),
-            tailer: FileTailer::new(),
+            tailer: FileTailer::with_previously_observed_paths(canonical_paths),
         })
     }
 
@@ -186,6 +198,24 @@ mod tests {
         assert!(
             logs_contain("ragloom.source.dir_scanner.skip_dir"),
             "expected ragloom.source.dir_scanner.skip_dir trace event"
+        );
+    }
+
+    #[test]
+    fn seeded_scanner_emits_delete_for_missing_file_on_first_poll() {
+        let tmp = tempdir().expect("create tempdir");
+        let missing = tmp.path().join("gone.txt").to_string_lossy().to_string();
+        let mut scanner = DirectoryScannerSource::with_previously_observed_paths(
+            tmp.path(),
+            HashSet::from([missing.clone()]),
+        )
+        .expect("create scanner");
+
+        assert_eq!(
+            scanner.poll(),
+            vec![SourceEvent::FileDeleted {
+                canonical_path: missing
+            }]
         );
     }
 

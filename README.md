@@ -313,9 +313,12 @@ YAML config to choose another file.
 
 The WAL is newline-delimited JSON and records planned `WorkItemV2` entries plus
 `SinkAckV2` acknowledgements. On startup, Ragloom replays work items that do not
-have a matching acknowledgement and seeds planner de-duplication from the WAL so
-already acknowledged file versions are not planned again. Corrupt or unreadable
-state files fail startup with a `state` error instead of being ignored.
+have a matching acknowledgement, seeds planner de-duplication from the WAL so
+already acknowledged file versions are not planned again, and restores the set
+of previously observed document paths used by delete detection. This means
+delete synchronization survives restarts as long as you reuse the same
+`--state-path` or `state.path`. Corrupt or unreadable state files fail startup
+with a `state` error instead of being ignored.
 Ragloom keeps the WAL append handle open for the lifetime of the process to
 avoid repeated open/close overhead, while still calling `sync_data()` after each
 record so the durability boundary remains one acknowledged append at a time.
