@@ -45,6 +45,25 @@ impl FileTailer {
         Self::default()
     }
 
+    /// Constructs a tailer seeded with previously observed canonical paths.
+    ///
+    /// # Why
+    /// Restart-time delete detection only needs path membership. We seed
+    /// placeholder versions so a first completed scan can emit delete events
+    /// for files removed while the process was offline.
+    pub fn with_previously_observed_paths(
+        canonical_paths: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let last_seen_version = canonical_paths
+            .into_iter()
+            .map(|canonical_path| (canonical_path, [0u8; 32]))
+            .collect();
+        Self {
+            last_seen_version,
+            pending: Vec::new(),
+        }
+    }
+
     /// Feeds an observation into the tailer.
     ///
     /// # Why
@@ -164,6 +183,30 @@ mod tests {
         );
 
         tailer.complete_scan(&HashSet::new());
+        assert!(tailer.drain().is_empty());
+    }
+
+    #[test]
+    fn seeded_missing_path_emits_delete_on_first_completed_scan() {
+        let mut tailer = FileTailer::with_previously_observed_paths(["/x/a.txt".to_string()]);
+
+        tailer.complete_scan(&HashSet::new());
+
+        assert_eq!(
+            tailer.drain(),
+            vec![SourceEvent::FileDeleted {
+                canonical_path: "/x/a.txt".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn seeded_existing_path_does_not_emit_spurious_delete() {
+        let mut tailer = FileTailer::with_previously_observed_paths(["/x/a.txt".to_string()]);
+        let observed = HashSet::from(["/x/a.txt".to_string()]);
+
+        tailer.complete_scan(&observed);
+
         assert!(tailer.drain().is_empty());
     }
 }
