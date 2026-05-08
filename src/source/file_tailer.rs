@@ -35,7 +35,7 @@ impl ObservedFileMeta {
 /// from any real filesystem scanning/watching implementation.
 #[derive(Debug, Default)]
 pub struct FileTailer {
-    last_seen_version: HashMap<String, [u8; 32]>,
+    last_seen_version: HashMap<String, Option<[u8; 32]>>,
     pending: Vec<SourceEvent>,
 }
 
@@ -56,7 +56,7 @@ impl FileTailer {
     ) -> Self {
         let last_seen_version = canonical_paths
             .into_iter()
-            .map(|canonical_path| (canonical_path, [0u8; 32]))
+            .map(|canonical_path| (canonical_path, None))
             .collect();
         Self {
             last_seen_version,
@@ -75,12 +75,12 @@ impl FileTailer {
         let should_emit = self
             .last_seen_version
             .get(&fingerprint.canonical_path)
-            .map(|existing| existing != &version_id)
+            .map(|existing| existing.as_ref() != Some(&version_id))
             .unwrap_or(true);
 
         if should_emit {
             self.last_seen_version
-                .insert(fingerprint.canonical_path.clone(), version_id);
+                .insert(fingerprint.canonical_path.clone(), Some(version_id));
             self.pending
                 .push(SourceEvent::FileVersionDiscovered(FileVersionDiscovered {
                     fingerprint,
@@ -207,6 +207,25 @@ mod tests {
 
         tailer.complete_scan(&observed);
 
+        assert!(tailer.drain().is_empty());
+    }
+
+    #[test]
+    fn seeded_existing_path_emits_discovery_once_on_first_observe() {
+        let mut tailer = FileTailer::with_previously_observed_paths(["/x/a.txt".to_string()]);
+
+        tailer.observe(ObservedFileMeta {
+            canonical_path: "/x/a.txt".to_string(),
+            size_bytes: 10,
+            mtime_unix_secs: 100,
+        });
+        assert_eq!(tailer.drain().len(), 1);
+
+        tailer.observe(ObservedFileMeta {
+            canonical_path: "/x/a.txt".to_string(),
+            size_bytes: 10,
+            mtime_unix_secs: 100,
+        });
         assert!(tailer.drain().is_empty());
     }
 }

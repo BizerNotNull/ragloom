@@ -276,6 +276,10 @@ pub fn unacked_work_items(records: &[WalRecord]) -> Vec<WalRecord> {
 /// The polling source keeps delete detection state in memory. On restart we
 /// rebuild the minimum source-side state from the WAL so the next completed
 /// scan can emit delete work for files removed while Ragloom was offline.
+///
+/// Legacy `WorkItem`/`SinkAck` records are intentionally ignored here because
+/// they only carry chunk ids, not canonical paths, so they cannot reconstruct
+/// source-side document membership for restart-time delete detection.
 pub fn known_live_document_paths(records: &[WalRecord]) -> std::collections::HashSet<String> {
     let mut live_paths = std::collections::HashSet::new();
 

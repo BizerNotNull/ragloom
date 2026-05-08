@@ -56,17 +56,29 @@ async fn delete_sync_survives_restart_when_reusing_same_wal() {
     let mut restarted_runtime = Runtime::with_shared_wal(restarted_source, Arc::clone(&wal));
 
     restarted_runtime.tick().expect("restart tick");
+    restarted_runtime.tick().expect("second restart tick");
 
     let delete_records = {
         let guard = wal.lock().await;
         guard.read_all().expect("read wal")
     };
+    let delete_count = delete_records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                WalRecord::DeleteDocument { canonical_path }
+                if canonical_path == &path.to_string_lossy()
+            )
+        })
+        .count();
     assert!(
         delete_records.contains(&WalRecord::DeleteDocument {
             canonical_path: path.to_string_lossy().to_string()
         }),
         "expected durable delete work after restart"
     );
+    assert_eq!(delete_count, 1, "delete work should not be re-emitted");
 
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     let executor = AckingExecutor {
