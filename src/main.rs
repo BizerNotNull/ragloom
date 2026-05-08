@@ -618,7 +618,6 @@ async fn bootstrap_collection_if_needed(
 struct PreparedStartup {
     embedding: std::sync::Arc<dyn ragloom::embed::EmbeddingProvider + Send + Sync>,
     sink: QdrantSink,
-    source: DirectoryScannerSource,
     chunker: std::sync::Arc<dyn ragloom::transform::chunker::Chunker>,
 }
 
@@ -787,17 +786,11 @@ async fn prepare_startup(cfg: &RunConfig) -> Result<PreparedStartup, RagloomErro
         }
     };
 
-    let source = DirectoryScannerSource::new(&cfg.dir).map_err(|e| {
-        RagloomError::new(RagloomErrorKind::Io, e)
-            .with_context("failed to create directory scanner source")
-    })?;
-
     bootstrap_collection_if_needed(cfg, &sink).await?;
 
     Ok(PreparedStartup {
         embedding,
         sink,
-        source,
         chunker,
     })
 }
@@ -866,19 +859,6 @@ async fn try_main() -> Result<(), RagloomError> {
         None => None,
     };
 
-    let PreparedStartup {
-        embedding,
-        sink,
-        source,
-        chunker,
-    } = match prepare_startup(&cfg).await {
-        Ok(startup) => startup,
-        Err(err) => {
-            health_state.mark_startup_failed();
-            return Err(err);
-        }
-    };
-
     let wal = match ragloom::state::wal::FileWal::open(&cfg.state_path)
         .map_err(|e| e.with_context("failed to initialize persistent WAL"))
     {
@@ -888,6 +868,33 @@ async fn try_main() -> Result<(), RagloomError> {
             return Err(err);
         }
     };
+
+    let previously_observed_paths = {
+        let guard = wal.lock().await;
+        let records = guard
+            .read_all()
+            .map_err(|e| e.with_context("failed to read persistent WAL for source recovery"))?;
+        ragloom::state::wal::known_live_document_paths(&records)
+    };
+
+    let PreparedStartup {
+        embedding,
+        sink,
+        chunker,
+    } = match prepare_startup(&cfg).await {
+        Ok(startup) => startup,
+        Err(err) => {
+            health_state.mark_startup_failed();
+            return Err(err);
+        }
+    };
+
+    let source =
+        DirectoryScannerSource::with_previously_observed_paths(&cfg.dir, previously_observed_paths)
+            .map_err(|e| {
+                RagloomError::new(RagloomErrorKind::Io, e)
+                    .with_context("failed to create directory scanner source")
+            })?;
 
     let runtime = Runtime::with_shared_wal(source, std::sync::Arc::clone(&wal));
     let summary = IngestionSummary::default();
