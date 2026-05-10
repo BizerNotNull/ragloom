@@ -170,7 +170,7 @@ mod tests {
 
         assert_eq!(err.kind, RagloomErrorKind::Embed);
         assert!(err.to_string().contains("non-success"));
-        assert!(err.to_string().contains(r#""error":"boom""#));
+        assert!(err.to_string().contains("error: boom"));
     }
 
     #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
