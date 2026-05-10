@@ -18,6 +18,10 @@ fn crate_version() -> String {
         .to_string()
 }
 
+fn workflow_pins_action_with_comment(workflow: &str, pinned: &str, version_comment: &str) -> bool {
+    workflow.contains(&format!("{pinned} # {version_comment}"))
+}
+
 #[test]
 fn release_workflow_supports_version_dispatch_and_release_notes() {
     let workflow_yaml = read_repo_file(".github/workflows/release.yml");
@@ -86,16 +90,24 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
         "expected publish workflow to verify crate and tag versions before cargo publish"
     );
     assert!(
-        release_workflow.contains("actions/setup-python@v5"),
-        "expected release workflow to pin Python for the verification script"
+        workflow_pins_action_with_comment(
+            &release_workflow,
+            "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+            "v5",
+        ),
+        "expected release workflow to pin Python for the verification script to a full SHA and preserve the source version comment"
     );
     assert!(
         release_workflow.contains("python-version: \"3.11\""),
         "expected release workflow to require Python 3.11 for tomllib"
     );
     assert!(
-        publish_workflow.contains("actions/setup-python@v5"),
-        "expected publish workflow to pin Python for the verification script"
+        workflow_pins_action_with_comment(
+            &publish_workflow,
+            "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+            "v5",
+        ),
+        "expected publish workflow to pin Python for the verification script to a full SHA and preserve the source version comment"
     );
     assert!(
         publish_workflow.contains("python-version: \"3.11\""),
@@ -249,8 +261,12 @@ fn release_workflow_packages_named_assets_and_keeps_macos_best_effort() {
     );
     assert!(
         publish_best_effort_yaml.contains("pattern: release-*-apple-darwin")
-            && publish_best_effort_yaml.contains("softprops/action-gh-release@v2"),
-        "expected successful macOS artifacts to be appended to the GitHub Release after the blocking targets publish"
+            && workflow_pins_action_with_comment(
+                &workflow_yaml,
+                "softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65",
+                "v2",
+            ),
+        "expected successful macOS artifacts to be appended to the GitHub Release after the blocking targets publish with a full SHA pin and preserved source version comment"
     );
 }
 
