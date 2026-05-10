@@ -249,19 +249,33 @@ Before opening or updating a PR:
 3. Update docs for user-visible changes.
 4. Keep the diff focused.
 5. Explain any intentional compatibility break, especially around chunking, IDs, payloads, or CLI flags.
+6. Use the repository's PR template in `.github/pull_request_template.md`.
+
+## Branch and commit workflow
+
+- Before starting code changes, sync the local branch tip with `upstream/main` and resolve divergence explicitly before editing.
+- Name new branches using the `{type}/{feature}` format, such as `fix/chunk-router` or `docs/agent-guidance`.
+- Do not use `codex/*` branch names for this repository.
+- Keep each commit scoped to a single feature, fix, or documentation change.
+- If a task grows beyond one focused change, split it into separate commits or separate branches.
 
 ## Agent-specific instructions
 
 When operating as Codex or another AI coding agent:
 
 * Inspect existing module patterns before introducing new patterns.
+* Sync with `upstream/main` before writing code or opening a new implementation branch.
+* Create focused branches using the `{type}/{feature}` naming convention rather than `codex/*`.
 * Prefer editing the smallest set of files needed.
 * Do not rewrite large modules unless requested.
 * Do not introduce broad refactors while fixing a narrow bug.
 * Do not add dependencies without a strong reason.
 * Do not change public behavior without updating tests and docs.
+* Keep each commit limited to one feature, fix, or docs-only change.
 * Run the most relevant tests for the edited area.
 * Run `cargo qa` before finalizing when feasible.
+* Follow the repository's issue templates under `.github/ISSUE_TEMPLATE/` when opening or updating issues.
+* Follow `.github/pull_request_template.md` when opening or updating pull requests.
 * Mention any commands that could not be run and why.
 * If tests fail, report the failure and the likely cause instead of claiming success.
 
