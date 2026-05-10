@@ -22,7 +22,7 @@ The project is intentionally small and explicit. **Preserve the minimalist desig
 - `src/pipeline` contains planning, runtime, worker execution, and acknowledgements.
 - `src/sink` contains vector sink abstractions and Qdrant integration.
 - `src/source` contains file discovery sources.
-- `src/state` contains in-memory WAL record types.
+- `src/state` contains WAL record types and file-backed persistence.
 - `src/transform` contains chunking, chunk metadata, router, markdown/code/semantic chunkers.
 - `xtask` contains local developer automation, currently `cargo qa`.
 
