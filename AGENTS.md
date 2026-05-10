@@ -271,12 +271,16 @@ Ragloom currently focuses on:
 
 - local filesystem input
 - polling directory scans
-- top-level files in the configured directory
-- UTF-8 document loading
+- recursive scanning of regular files under one configured directory
+- UTF-8 text, Markdown, and source code file loading
+- recursive, Markdown-aware, code-aware, and opt-in semantic chunking
 - Qdrant as the built-in sink
 - OpenAI and generic HTTP embedding backends
-- in-memory WAL
+- deterministic point IDs
+- persistent local WAL state
+- bounded in-process retry for transient ingest failures
+- delete synchronization for previously observed documents
+- opt-in local health and metrics endpoint
+- optional first-run collection bootstrap for the configured target collection
 
-Avoid expanding scope accidentally. New operational features such as persistent WAL, recursive scanning, collection management, retry queues, health endpoints, and dead-letter handling should be explicit design changes with tests and docs.
-
-```
+Avoid expanding scope accidentally. New operational features such as additional document parsers, new sink types, broader collection lifecycle management, persistent dead-letter handling, or non-local operator surfaces should be explicit design changes with tests and docs.
