@@ -2,6 +2,15 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+const SETUP_PYTHON_V5_PIN: &str =
+    "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5";
+const CODEQL_V4_INIT_PIN: &str =
+    "github/codeql-action/init@5e316336eb4f107009e477d4bfbfff13d7250fae # v4";
+const ACTION_GH_RELEASE_V2_REF: &str =
+    "softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65";
+const ACTION_GH_RELEASE_V2_PIN: &str =
+    "softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2";
+
 fn read_repo_file(path: &str) -> String {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     fs::read_to_string(repo_root.join(path)).expect("read repository file")
@@ -16,6 +25,13 @@ fn crate_version() -> String {
         .and_then(|version| version.strip_suffix('"'))
         .expect("Cargo.toml package.version is present")
         .to_string()
+}
+
+fn workflow_mapping<'a>(value: &'a serde_yaml::Value, field: &str) -> &'a serde_yaml::Mapping {
+    value
+        .get(serde_yaml::Value::String(field.to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .unwrap_or_else(|| panic!("expected `{field}` to be a mapping"))
 }
 
 #[test]
@@ -76,6 +92,16 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
     let publish_workflow = read_repo_file(".github/workflows/publish-crate.yml");
     let quality_workflow = read_repo_file(".github/workflows/quality-deep.yml");
     let codeql_workflow = read_repo_file(".github/workflows/codeql.yml");
+    let release_workflow_yaml: serde_yaml::Value =
+        serde_yaml::from_str(&release_workflow).expect("release workflow is valid YAML");
+    let release_permissions = workflow_mapping(&release_workflow_yaml, "permissions");
+    let release_jobs = workflow_mapping(&release_workflow_yaml, "jobs");
+    let publish_release = release_jobs
+        .get(serde_yaml::Value::String("publish-release".to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("expected release workflow to define publish-release");
+    let publish_release_value = serde_yaml::Value::Mapping(publish_release.clone());
+    let publish_release_permissions = workflow_mapping(&publish_release_value, "permissions");
 
     assert!(
         release_workflow.contains("verify-release-version"),
@@ -86,16 +112,16 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
         "expected publish workflow to verify crate and tag versions before cargo publish"
     );
     assert!(
-        release_workflow.contains("actions/setup-python@v5"),
-        "expected release workflow to pin Python for the verification script"
+        release_workflow.contains(SETUP_PYTHON_V5_PIN),
+        "expected release workflow to pin Python to an immutable v5 commit for the verification script"
     );
     assert!(
         release_workflow.contains("python-version: \"3.11\""),
         "expected release workflow to require Python 3.11 for tomllib"
     );
     assert!(
-        publish_workflow.contains("actions/setup-python@v5"),
-        "expected publish workflow to pin Python for the verification script"
+        publish_workflow.contains(SETUP_PYTHON_V5_PIN),
+        "expected publish workflow to pin Python to an immutable v5 commit for the verification script"
     );
     assert!(
         publish_workflow.contains("python-version: \"3.11\""),
@@ -115,8 +141,17 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
         "expected publish workflow to skip cargo publish cleanly when the crates.io token is unavailable"
     );
     assert!(
-        release_workflow.contains("security-events: write"),
-        "expected release workflow permissions to include security-events: write for reusable workflow calls"
+        matches!(
+            release_permissions.get(serde_yaml::Value::String("contents".to_string())),
+            Some(serde_yaml::Value::String(level)) if level == "read"
+        ) && release_permissions.len() == 1
+            && matches!(
+                publish_release_permissions
+                    .get(serde_yaml::Value::String("contents".to_string())),
+                Some(serde_yaml::Value::String(level)) if level == "write"
+            )
+            && publish_release_permissions.len() == 1,
+        "expected release workflow to keep top-level permissions read-only and scope release mutation to publish jobs"
     );
     assert!(
         release_workflow.contains("already exists at ${RELEASE_REF}; reusing it"),
@@ -127,8 +162,12 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
         "expected deep quality workflow to keep Miri out of the release-critical CI path"
     );
     assert!(
-        codeql_workflow.contains("github/codeql-action/init@v4"),
-        "expected repository code scanning to run through CodeQL"
+        codeql_workflow.contains(CODEQL_V4_INIT_PIN),
+        "expected repository code scanning to pin CodeQL to an immutable v4 commit"
+    );
+    assert!(
+        codeql_workflow.contains("security-events: write"),
+        "expected CodeQL analyze jobs to keep the permission needed for SARIF uploads"
     );
     assert!(
         codeql_workflow.contains("languages: rust"),
@@ -249,8 +288,9 @@ fn release_workflow_packages_named_assets_and_keeps_macos_best_effort() {
     );
     assert!(
         publish_best_effort_yaml.contains("pattern: release-*-apple-darwin")
-            && publish_best_effort_yaml.contains("softprops/action-gh-release@v2"),
-        "expected successful macOS artifacts to be appended to the GitHub Release after the blocking targets publish"
+            && publish_best_effort_yaml.contains(ACTION_GH_RELEASE_V2_REF)
+            && workflow_yaml.contains(ACTION_GH_RELEASE_V2_PIN),
+        "expected successful macOS artifacts to be appended to the GitHub Release with the immutable v2 release action pin"
     );
 }
 
