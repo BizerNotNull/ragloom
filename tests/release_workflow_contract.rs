@@ -19,7 +19,13 @@ fn crate_version() -> String {
 }
 
 fn workflow_pins_action_with_comment(workflow: &str, pinned: &str, version_comment: &str) -> bool {
-    workflow.contains(&format!("{pinned} # {version_comment}"))
+    let expected = format!("uses: {pinned} # {version_comment}");
+
+    workflow
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("uses:"))
+        .any(|line| line == expected)
 }
 
 #[test]
