@@ -618,10 +618,10 @@ If startup looks healthy but nothing appears in Qdrant, check the latest `ragloo
 
 ### OpenAI API errors
 
-Verify your API key is set correctly:
+Verify your API key is set without printing the value:
 
 ```bash
-echo $OPENAI_API_KEY
+if [ -n "$OPENAI_API_KEY" ]; then echo "OPENAI_API_KEY is set"; else echo "OPENAI_API_KEY is not set"; fi
 ```
 
 Test the embedding endpoint directly:
@@ -632,6 +632,8 @@ curl https://api.openai.com/v1/embeddings \
   -H "Content-Type: application/json" \
   -d '{"input":"test","model":"text-embedding-3-small"}'
 ```
+
+Do not share command output if it includes credentials or other sensitive response details.
 
 ## Current limitations
 
