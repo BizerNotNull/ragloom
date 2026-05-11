@@ -128,8 +128,8 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
         "expected publish workflow to skip cargo publish cleanly when the crates.io token is unavailable"
     );
     assert!(
-        release_workflow.contains("security-events: write"),
-        "expected release workflow permissions to include security-events: write for reusable workflow calls"
+        !release_workflow.contains("security-events: write"),
+        "expected release workflow to avoid unused security-events write permissions"
     );
     assert!(
         release_workflow.contains("already exists at ${RELEASE_REF}; reusing it"),
