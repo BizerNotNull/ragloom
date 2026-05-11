@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::embed::EmbeddingProvider;
+use crate::embed::{EmbeddingProvider, read_error_body};
 use crate::error::{RagloomError, RagloomErrorKind};
 
 /// HTTP embedding client configuration.
@@ -90,11 +90,14 @@ impl EmbeddingProvider for HttpEmbeddingClient {
             })?;
 
         if !response.status().is_success() {
+            let status = response.status();
+            let body = read_error_body(response).await;
             return Err(
                 RagloomError::from_kind(RagloomErrorKind::Embed).with_context(format!(
-                    "embedding request returned non-success status (endpoint={}, status={})",
+                    "embedding request returned non-success status (endpoint={}, status={}, body={})",
                     self.config.endpoint,
-                    response.status()
+                    status,
+                    body
                 )),
             );
         }
@@ -167,6 +170,7 @@ mod tests {
 
         assert_eq!(err.kind, RagloomErrorKind::Embed);
         assert!(err.to_string().contains("non-success"));
+        assert!(err.to_string().contains("error: boom"));
     }
 
     #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]

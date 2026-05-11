@@ -22,7 +22,7 @@ The project is intentionally small and explicit. **Preserve the minimalist desig
 - `src/pipeline` contains planning, runtime, worker execution, and acknowledgements.
 - `src/sink` contains vector sink abstractions and Qdrant integration.
 - `src/source` contains file discovery sources.
-- `src/state` contains in-memory WAL record types.
+- `src/state` contains WAL record types and file-backed persistence.
 - `src/transform` contains chunking, chunk metadata, router, markdown/code/semantic chunkers.
 - `xtask` contains local developer automation, currently `cargo qa`.
 
@@ -249,19 +249,33 @@ Before opening or updating a PR:
 3. Update docs for user-visible changes.
 4. Keep the diff focused.
 5. Explain any intentional compatibility break, especially around chunking, IDs, payloads, or CLI flags.
+6. Use the repository's PR template in `.github/pull_request_template.md`.
+
+## Branch and commit workflow
+
+- Before starting code changes, sync the local branch tip with `upstream/main` and resolve divergence explicitly before editing.
+- Name new branches using the `{type}/{feature}` format, such as `fix/chunk-router` or `docs/agent-guidance`.
+- Do not use `codex/*` branch names for this repository.
+- Keep each commit scoped to a single feature, fix, or documentation change.
+- If a task grows beyond one focused change, split it into separate commits or separate branches.
 
 ## Agent-specific instructions
 
 When operating as Codex or another AI coding agent:
 
 * Inspect existing module patterns before introducing new patterns.
+* Sync with `upstream/main` before writing code or opening a new implementation branch.
+* Create focused branches using the `{type}/{feature}` naming convention rather than `codex/*`.
 * Prefer editing the smallest set of files needed.
 * Do not rewrite large modules unless requested.
 * Do not introduce broad refactors while fixing a narrow bug.
 * Do not add dependencies without a strong reason.
 * Do not change public behavior without updating tests and docs.
+* Keep each commit limited to one feature, fix, or docs-only change.
 * Run the most relevant tests for the edited area.
 * Run `cargo qa` before finalizing when feasible.
+* Follow the repository's issue templates under `.github/ISSUE_TEMPLATE/` when opening or updating issues.
+* Follow `.github/pull_request_template.md` when opening or updating pull requests.
 * Mention any commands that could not be run and why.
 * If tests fail, report the failure and the likely cause instead of claiming success.
 
@@ -271,12 +285,16 @@ Ragloom currently focuses on:
 
 - local filesystem input
 - polling directory scans
-- top-level files in the configured directory
-- UTF-8 document loading
+- recursive scanning of regular files under one configured directory
+- UTF-8 text, Markdown, and source code file loading
+- recursive, Markdown-aware, code-aware, and opt-in semantic chunking
 - Qdrant as the built-in sink
 - OpenAI and generic HTTP embedding backends
-- in-memory WAL
+- deterministic point IDs
+- persistent local WAL state
+- bounded in-process retry for transient ingest failures
+- delete synchronization for previously observed documents
+- opt-in local health and metrics endpoint
+- optional first-run collection bootstrap for the configured target collection
 
-Avoid expanding scope accidentally. New operational features such as persistent WAL, recursive scanning, collection management, retry queues, health endpoints, and dead-letter handling should be explicit design changes with tests and docs.
-
-```
+Avoid expanding scope accidentally. New operational features such as additional document parsers, new sink types, broader collection lifecycle management, persistent dead-letter handling, or non-local operator surfaces should be explicit design changes with tests and docs.

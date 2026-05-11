@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
-use crate::embed::EmbeddingProvider;
+use crate::embed::{EmbeddingProvider, read_error_body};
 use crate::error::{RagloomError, RagloomErrorKind};
 
 /// OpenAI embedding client configuration.
@@ -117,11 +117,14 @@ impl EmbeddingProvider for OpenAiEmbeddingClient {
             })?;
 
         if !response.status().is_success() {
+            let status = response.status();
+            let body = read_error_body(response).await;
             return Err(RagloomError::from_kind(RagloomErrorKind::Embed).with_context(format!(
-                "openai embedding request returned non-success status (model={}, endpoint={}, status={})",
+                "openai embedding request returned non-success status (model={}, endpoint={}, status={}, body={})",
                 self.config.model,
                 self.config.endpoint,
-                response.status()
+                status,
+                body
             )));
         }
 
@@ -189,5 +192,28 @@ mod tests {
         let out = client.embed(&["hello".to_string()]).await.expect("embed");
 
         assert_eq!(out, vec![vec![1.0, 2.0]]);
+    }
+
+    #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
+    #[tokio::test]
+    async fn non_success_status_includes_upstream_body_text() {
+        let url = spawn_test_server(429, r#"{ "error": { "message": "quota exceeded" } }"#);
+
+        let client = OpenAiEmbeddingClient::new(OpenAiEmbeddingConfig {
+            endpoint: url,
+            api_key: "test-key".to_string(),
+            model: "text-embedding-3-small".to_string(),
+            timeout: Duration::from_secs(5),
+        })
+        .expect("client");
+
+        let err = client
+            .embed(&["hello".to_string()])
+            .await
+            .expect_err("should fail");
+
+        assert_eq!(err.kind, RagloomErrorKind::Embed);
+        assert!(err.to_string().contains("non-success"));
+        assert!(err.to_string().contains("quota exceeded"));
     }
 }

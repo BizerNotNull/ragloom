@@ -28,6 +28,19 @@ fn workflow_pins_action_with_comment(workflow: &str, pinned: &str, version_comme
         .any(|line| line == expected)
 }
 
+fn workflow_contains_sha_pinned_use(workflow_yaml: &str, action: &str) -> bool {
+    let prefix = format!("uses: {action}@");
+
+    workflow_yaml.lines().any(|line| {
+        let Some(rest) = line.trim().strip_prefix(&prefix) else {
+            return false;
+        };
+        let sha = rest.split_whitespace().next().unwrap_or_default();
+
+        sha.len() == 40 && sha.chars().all(|character| character.is_ascii_hexdigit())
+    })
+}
+
 #[test]
 fn release_workflow_supports_version_dispatch_and_release_notes() {
     let workflow_yaml = read_repo_file(".github/workflows/release.yml");
@@ -133,8 +146,8 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
         "expected publish workflow to skip cargo publish cleanly when the crates.io token is unavailable"
     );
     assert!(
-        release_workflow.contains("security-events: write"),
-        "expected release workflow permissions to include security-events: write for reusable workflow calls"
+        !release_workflow.contains("security-events: write"),
+        "expected release workflow to avoid unused security-events write permissions"
     );
     assert!(
         release_workflow.contains("already exists at ${RELEASE_REF}; reusing it"),
@@ -145,8 +158,12 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
         "expected deep quality workflow to keep Miri out of the release-critical CI path"
     );
     assert!(
-        codeql_workflow.contains("github/codeql-action/init@v4"),
-        "expected repository code scanning to run through CodeQL"
+        workflow_contains_sha_pinned_use(&codeql_workflow, "github/codeql-action/init"),
+        "expected repository code scanning to run through a SHA-pinned CodeQL init action"
+    );
+    assert!(
+        workflow_contains_sha_pinned_use(&codeql_workflow, "github/codeql-action/analyze"),
+        "expected repository code scanning to run through a SHA-pinned CodeQL analyze action"
     );
     assert!(
         codeql_workflow.contains("languages: rust"),

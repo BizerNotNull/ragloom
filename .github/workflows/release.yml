@@ -12,10 +12,7 @@ on:
         type: string
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
-  security-events: write
+  contents: read
 
 concurrency:
   group: release-${{ inputs.version || github.ref_name }}
@@ -256,6 +253,8 @@ jobs:
       - prepare-release
       - release-binaries
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -308,6 +307,8 @@ jobs:
       - release-binaries-best-effort
     if: always() && needs.publish-release.result == 'success'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download macOS release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
