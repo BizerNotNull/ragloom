@@ -263,6 +263,12 @@ fn release_workflow_packages_named_assets_and_keeps_macos_best_effort() {
         "expected release workflow to package Windows assets as zip archives"
     );
     assert!(
+        supported_job_yaml.matches("upload-artifact: false").count() == 1
+            && best_effort_yaml.matches("upload-artifact: false").count() == 1
+            && !workflow_yaml.contains("upload-release-assets: true"),
+        "expected SBOM generation to avoid duplicate artifact uploads and let the explicit release artifact step own publication"
+    );
+    assert!(
         supported_job_yaml.contains("x86_64-unknown-linux-gnu")
             && supported_job_yaml.contains("aarch64-unknown-linux-gnu")
             && supported_job_yaml.contains("x86_64-pc-windows-msvc"),

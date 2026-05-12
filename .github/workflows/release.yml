@@ -141,6 +141,8 @@ jobs:
         with:
           path: dist/${{ matrix.target }}
           output-file: ragloom-${{ needs.prepare-release.outputs.tag }}-${{ matrix.target }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
 
       - name: Generate checksums
         shell: bash
@@ -223,6 +225,8 @@ jobs:
         with:
           path: dist/${{ matrix.target }}
           output-file: ragloom-${{ needs.prepare-release.outputs.tag }}-${{ matrix.target }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
 
       - name: Generate checksums
         shell: bash
