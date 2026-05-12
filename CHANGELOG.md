@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-12
+
+### Fixed
+- Delete synchronization now survives restarts by rebuilding the source's
+  previously observed canonical-path set from the WAL before the first scan.
+  Files removed while Ragloom is offline are emitted as durable delete work on
+  the next startup instead of being stranded in Qdrant.
+
+### Changed
+- OpenAI and generic HTTP embedding errors now include a bounded, sanitized
+  preview of upstream non-success response bodies to make provider failures
+  easier to diagnose without logging secrets or full payloads.
+
+## [0.2.0] - 2026-05-08
+
 ### Added
 - Persistent local WAL state via `FileWal`, stored by default at
   `.ragloom/wal.ndjson` and configurable with `--state-path` or `state.path`.
