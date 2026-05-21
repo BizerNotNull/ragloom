@@ -4,22 +4,30 @@ Issues and pull requests are welcome. Keep changes small, test-backed, and align
 
 ## Local Verification
 
-Run these checks before opening a pull request:
+The local verification commands are:
+
+- `cargo qa`: the fast default contributor gate
+- `cargo maintainer-qa`: the authoritative deeper maintainer gate for
+  release-sensitive and v0.3 stability work
+
+`cargo qa` runs:
 
 - `cargo fmt --check`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace --all-targets --all-features`
 
-GitHub Actions also runs the authoritative pre-merge stability checks on pull requests:
+`cargo maintainer-qa` runs `cargo qa` plus:
 
 - `cargo build --features fastembed`
 - `cargo test --workspace --all-targets --features fastembed`
 - `cargo test --workspace --features loom`
+- `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS=-D warnings`
 - `cargo deny check`
 - `cargo audit`
-- `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS=-D warnings`
 
-Additional deeper checks still used on `main` and release paths:
+GitHub Actions also runs the same deeper stability checks on pull requests.
+
+Additional manual deep checks still used on `main` and release paths:
 
 - `cargo llvm-cov --workspace --all-features`
 - `cargo bench`

@@ -24,7 +24,7 @@ The project is intentionally small and explicit. **Preserve the minimalist desig
 - `src/source` contains file discovery sources.
 - `src/state` contains WAL record types and file-backed persistence.
 - `src/transform` contains chunking, chunk metadata, router, markdown/code/semantic chunkers.
-- `xtask` contains local developer automation, currently `cargo qa`.
+- `xtask` contains local developer automation, including `cargo qa` and `cargo maintainer-qa`.
 
 ## Build and verification commands
 
@@ -45,6 +45,21 @@ cargo qa
 ```
 
 `cargo qa` runs formatting, Clippy with warnings denied, and the full workspace test suite.
+
+### Authoritative maintainer gate
+
+```bash
+cargo maintainer-qa
+```
+
+`cargo maintainer-qa` runs `cargo qa` plus the deeper local maintainer checks:
+
+- `cargo test --workspace --features loom`
+- `cargo build --features fastembed`
+- `cargo test --workspace --all-targets --features fastembed`
+- `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS=-D warnings`
+- `cargo deny check`
+- `cargo audit`
 
 ### Additional deeper checks
 

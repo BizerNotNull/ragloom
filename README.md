@@ -667,9 +667,24 @@ Before opening a pull request, run:
 cargo qa
 ```
 
-Pull requests also run the repository's pre-merge stability gate in GitHub
-Actions, including `fastembed`, `loom`, dependency audit, and rustdoc warning
-checks.
+Maintainers preparing release-sensitive or v0.3 stability work should also run
+the authoritative deeper local gate:
+
+```bash
+cargo maintainer-qa
+```
+
+`cargo qa` stays the fast contributor gate. `cargo maintainer-qa` extends it
+with the checks that currently matter for local maintainer confidence:
+
+- `cargo test --workspace --features loom`
+- `cargo build --features fastembed`
+- `cargo test --workspace --all-targets --features fastembed`
+- `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS=-D warnings`
+- `cargo deny check`
+- `cargo audit`
+
+GitHub Actions runs the same deeper stability checks on pull requests.
 
 See `CONTRIBUTING.md` for development expectations, `SUPPORT.md` for support policy, and `SECURITY.md` for vulnerability reporting.
 
