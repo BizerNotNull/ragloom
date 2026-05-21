@@ -27,13 +27,14 @@ Ragloom is currently alpha software.
 
 It is useful for local-folder to Qdrant ingestion experiments and small automation tasks.
 
-Supported today:
+The v0.3 direction is to harden a narrow core instead of widening scope.
+
+Core path the project is hardening for v0.3 release-readiness:
 
 - local filesystem source
 - recursive scanning of regular files under one configured directory
 - UTF-8 text, Markdown, and source code files
 - recursive, Markdown-aware, and code-aware chunking
-- experimental semantic chunking
 - OpenAI and generic HTTP embedding APIs
 - Qdrant sink
 - deterministic point IDs
@@ -41,6 +42,15 @@ Supported today:
 - bounded in-process retry for transient ingest failures
 - pretty and JSON structured logs
 - opt-in local health and metrics endpoint
+
+Feature-gated paths:
+
+- `fastembed` local semantic signal support when built with `--features fastembed`
+
+Experimental or best-effort paths:
+
+- semantic chunking remains opt-in and experimental
+- macOS release artifacts remain best-effort convenience binaries rather than release-blocking targets
 
 Not supported yet:
 
@@ -543,13 +553,13 @@ Status: shipped in `v0.2.0`, with restart-safe delete synchronization refined in
 - health endpoint
 - metrics endpoint
 
-### v0.3 - More document coverage
+### v0.3 - Stability, workflow, and code quality hardening
 
-- PDF
-- HTML
-- DOCX
-- frontmatter metadata
-- external parser integrations
+- keep the local-filesystem to Qdrant path release-ready on supported Linux and Windows targets
+- require green `ci` and `quality-deep` workflow states, or equivalent local maintainer verification, before cutting the release
+- keep feature-gated paths such as `fastembed` exercised by dedicated checks without making them the default runtime path
+- document experimental and best-effort boundaries explicitly instead of implying broader parser or platform guarantees
+- defer broader document-format expansion until the existing ingestion path is easier to verify and ship repeatedly
 
 ## Limitations
 
