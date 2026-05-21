@@ -10,10 +10,18 @@ Run these checks before opening a pull request:
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace --all-targets --all-features`
 
-Deeper checks used by CI on `main` and release paths:
+GitHub Actions also runs the authoritative pre-merge stability checks on pull requests:
+
+- `cargo build --features fastembed`
+- `cargo test --workspace --all-targets --features fastembed`
+- `cargo test --workspace --features loom`
+- `cargo deny check`
+- `cargo audit`
+- `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS=-D warnings`
+
+Additional deeper checks still used on `main` and release paths:
 
 - `cargo llvm-cov --workspace --all-features`
-- `cargo test --workspace --features loom`
 - `cargo bench`
 
 GitHub-hosted security scanning runs through CodeQL and repository governance workflows rather than Miri.

@@ -667,6 +667,10 @@ Before opening a pull request, run:
 cargo qa
 ```
 
+Pull requests also run the repository's pre-merge stability gate in GitHub
+Actions, including `fastembed`, `loom`, dependency audit, and rustdoc warning
+checks.
+
 See `CONTRIBUTING.md` for development expectations, `SUPPORT.md` for support policy, and `SECURITY.md` for vulnerability reporting.
 
 ## License
