@@ -176,6 +176,69 @@ fn release_workflows_verify_tag_and_crate_version_consistency_and_pin_python() {
 }
 
 #[test]
+fn quality_deep_workflow_exposes_pre_merge_stability_gate() {
+    let workflow_yaml = read_repo_file(".github/workflows/quality-deep.yml");
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(&workflow_yaml).expect("quality workflow is valid YAML");
+
+    let on = workflow
+        .get("on")
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("expected quality workflow to define an `on` mapping");
+    let jobs = workflow
+        .get("jobs")
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("expected quality workflow to define jobs");
+
+    assert!(
+        on.contains_key(serde_yaml::Value::String("pull_request".to_string())),
+        "expected deep quality workflow to run on pull requests before merge"
+    );
+    assert!(
+        on.contains_key(serde_yaml::Value::String("workflow_call".to_string())),
+        "expected deep quality workflow to remain reusable from release paths"
+    );
+    assert!(
+        workflow_yaml.contains("if: github.event_name != 'pull_request'"),
+        "expected coverage to stay outside the PR-visible stability gate"
+    );
+
+    let fastembed = jobs
+        .get(serde_yaml::Value::String("fastembed".to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("expected quality workflow to define a fastembed job");
+    let loom = jobs
+        .get(serde_yaml::Value::String("loom".to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("expected quality workflow to define a loom job");
+    let docs_and_security = jobs
+        .get(serde_yaml::Value::String("docs-and-security".to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("expected quality workflow to define a docs-and-security job");
+
+    let fastembed_yaml = serde_yaml::to_string(fastembed).expect("serialize fastembed job");
+    let loom_yaml = serde_yaml::to_string(loom).expect("serialize loom job");
+    let docs_and_security_yaml =
+        serde_yaml::to_string(docs_and_security).expect("serialize docs-and-security job");
+
+    assert!(
+        fastembed_yaml.contains("cargo build --features fastembed")
+            && fastembed_yaml.contains("cargo test --workspace --all-targets --features fastembed"),
+        "expected PR-visible stability checks to cover fastembed build and tests"
+    );
+    assert!(
+        loom_yaml.contains("cargo test --workspace --features loom"),
+        "expected PR-visible stability checks to cover loom tests"
+    );
+    assert!(
+        docs_and_security_yaml.contains("cargo deny check")
+            && docs_and_security_yaml.contains("cargo audit")
+            && docs_and_security_yaml.contains("cargo doc --workspace --no-deps"),
+        "expected PR-visible stability checks to cover docs, cargo-deny, and cargo-audit"
+    );
+}
+
+#[test]
 fn release_version_verifier_accepts_v_prefixed_manual_version_input() {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let output_file = tempfile::NamedTempFile::new().expect("create temporary GITHUB_OUTPUT");
