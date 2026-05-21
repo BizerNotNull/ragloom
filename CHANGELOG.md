@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Docs
+- Reframed the `README.md` `v0.3` roadmap around stability, workflow
+  readiness, and code quality hardening instead of broader document-format
+  expansion.
+- Documented the `v0.3` release-readiness gate and aligned the stable,
+  feature-gated, experimental, and best-effort support boundaries across
+  `README.md` and `SUPPORT.md`.
+
 ## [0.2.1] - 2026-05-12
 
 ### Fixed
