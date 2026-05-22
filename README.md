@@ -140,12 +140,12 @@ Download the archive for your platform from the GitHub Release page, extract it,
 Examples:
 
 ```bash
-tar -xzf ragloom-v0.2.1-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf ragloom-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
 ./ragloom --version
 ```
 
 ```powershell
-Expand-Archive .\ragloom-v0.2.1-x86_64-pc-windows-msvc.zip -DestinationPath .
+Expand-Archive .\ragloom-v0.3.0-x86_64-pc-windows-msvc.zip -DestinationPath .
 .\ragloom.exe --version
 ```
 
@@ -485,10 +485,10 @@ build/version information:
 {
   "status": "ready",
   "ready": true,
-  "version": "0.2.1",
+  "version": "0.3.0",
   "build": {
     "package": "ragloom",
-    "version": "0.2.1"
+    "version": "0.3.0"
   }
 }
 ```

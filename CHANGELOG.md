@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-22
+
 ### Docs
 - Reframed the `README.md` `v0.3` roadmap around stability, workflow
   readiness, and code quality hardening instead of broader document-format
