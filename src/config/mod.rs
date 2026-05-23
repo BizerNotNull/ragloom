@@ -31,7 +31,21 @@ pub struct PipelineConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SourceConfig {
-    pub root: String,
+    #[serde(default = "default_source_kind")]
+    pub kind: SourceKind,
+    #[serde(default)]
+    pub root: Option<String>,
+    #[serde(default)]
+    pub bucket: Option<String>,
+    #[serde(default)]
+    pub prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceKind {
+    Filesystem,
+    S3,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,6 +106,10 @@ fn default_state_path() -> String {
     DEFAULT_STATE_PATH.to_string()
 }
 
+fn default_source_kind() -> SourceKind {
+    SourceKind::Filesystem
+}
+
 fn default_retry_max_attempts() -> u32 {
     3
 }
@@ -127,10 +145,7 @@ impl PipelineConfig {
     /// Reload applies configs at runtime. Validation prevents partial/unsafe
     /// configs from being activated.
     pub fn validate(&self) -> Result<(), RagloomError> {
-        if self.source.root.trim().is_empty() {
-            return Err(RagloomError::from_kind(RagloomErrorKind::Config)
-                .with_context("source.root is empty"));
-        }
+        self.source.validate()?;
         if self.embed.endpoint.trim().is_empty() {
             return Err(RagloomError::from_kind(RagloomErrorKind::Config)
                 .with_context("embed.endpoint is empty"));
@@ -172,6 +187,55 @@ impl PipelineConfig {
     }
 }
 
+impl SourceConfig {
+    fn validate(&self) -> Result<(), RagloomError> {
+        match self.kind {
+            SourceKind::Filesystem => {
+                let root = self.root.as_deref().ok_or_else(|| {
+                    RagloomError::from_kind(RagloomErrorKind::Config)
+                        .with_context("source.root is required when source.kind=filesystem")
+                })?;
+                if root.trim().is_empty() {
+                    return Err(RagloomError::from_kind(RagloomErrorKind::Config)
+                        .with_context("source.root is empty"));
+                }
+                if self.bucket.is_some() {
+                    return Err(RagloomError::from_kind(RagloomErrorKind::Config)
+                        .with_context("source.bucket is only valid when source.kind=s3"));
+                }
+                if self.prefix.is_some() {
+                    return Err(RagloomError::from_kind(RagloomErrorKind::Config)
+                        .with_context("source.prefix is only valid when source.kind=s3"));
+                }
+            }
+            SourceKind::S3 => {
+                let bucket = self.bucket.as_deref().ok_or_else(|| {
+                    RagloomError::from_kind(RagloomErrorKind::Config)
+                        .with_context("source.bucket is required when source.kind=s3")
+                })?;
+                if bucket.trim().is_empty() {
+                    return Err(RagloomError::from_kind(RagloomErrorKind::Config)
+                        .with_context("source.bucket is empty"));
+                }
+                if self
+                    .prefix
+                    .as_deref()
+                    .is_some_and(|prefix| prefix.trim().is_empty())
+                {
+                    return Err(RagloomError::from_kind(RagloomErrorKind::Config)
+                        .with_context("source.prefix is empty"));
+                }
+                if self.root.is_some() {
+                    return Err(RagloomError::from_kind(RagloomErrorKind::Config)
+                        .with_context("source.root is only valid when source.kind=filesystem"));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +265,8 @@ health:
         assert_eq!(cfg.state.path, ".ragloom/wal.ndjson");
         assert_eq!(cfg.retry.max_attempts, 3);
         assert_eq!(cfg.health.addr.as_deref(), Some("127.0.0.1:0"));
+        assert_eq!(cfg.source.kind, SourceKind::Filesystem);
+        assert_eq!(cfg.source.root.as_deref(), Some("/data"));
     }
 
     #[test]
@@ -239,5 +305,79 @@ health:
         let err = cfg.validate().expect_err("validate");
         assert_eq!(err.kind, RagloomErrorKind::Config);
         assert!(err.to_string().contains("health.addr"));
+    }
+
+    #[test]
+    fn validates_explicit_filesystem_source_kind() {
+        let yaml = r#"
+source:
+  kind: filesystem
+  root: "/data"
+embed:
+  endpoint: "http://localhost:8080/embed"
+sink:
+  qdrant_url: "http://localhost:6333"
+  collection: "docs"
+"#;
+        let cfg = PipelineConfig::from_yaml_str(yaml).expect("parse");
+        cfg.validate().expect("validate");
+        assert_eq!(cfg.source.kind, SourceKind::Filesystem);
+        assert_eq!(cfg.source.root.as_deref(), Some("/data"));
+    }
+
+    #[test]
+    fn rejects_filesystem_source_with_s3_fields() {
+        let yaml = r#"
+source:
+  kind: filesystem
+  root: "/data"
+  bucket: "docs"
+embed:
+  endpoint: "http://localhost:8080/embed"
+sink:
+  qdrant_url: "http://localhost:6333"
+  collection: "docs"
+"#;
+        let cfg = PipelineConfig::from_yaml_str(yaml).expect("parse");
+        let err = cfg.validate().expect_err("validate");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(err.to_string().contains("source.bucket"));
+    }
+
+    #[test]
+    fn rejects_s3_source_without_bucket() {
+        let yaml = r#"
+source:
+  kind: s3
+embed:
+  endpoint: "http://localhost:8080/embed"
+sink:
+  qdrant_url: "http://localhost:6333"
+  collection: "docs"
+"#;
+        let cfg = PipelineConfig::from_yaml_str(yaml).expect("parse");
+        let err = cfg.validate().expect_err("validate");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(err.to_string().contains("source.bucket"));
+    }
+
+    #[test]
+    fn validates_s3_source_shape() {
+        let yaml = r#"
+source:
+  kind: s3
+  bucket: "docs"
+  prefix: "kb/"
+embed:
+  endpoint: "http://localhost:8080/embed"
+sink:
+  qdrant_url: "http://localhost:6333"
+  collection: "docs"
+"#;
+        let cfg = PipelineConfig::from_yaml_str(yaml).expect("parse");
+        cfg.validate().expect("validate");
+        assert_eq!(cfg.source.kind, SourceKind::S3);
+        assert_eq!(cfg.source.bucket.as_deref(), Some("docs"));
+        assert_eq!(cfg.source.prefix.as_deref(), Some("kb/"));
     }
 }
