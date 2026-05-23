@@ -258,11 +258,17 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         .ok_or_else(|| {
             cli_config_error("missing required value: --qdrant-url or sink.qdrant_url in --config")
         })?;
+    if qdrant_url.trim().is_empty() {
+        return Err(cli_config_error("--qdrant-url or sink.qdrant_url is empty"));
+    }
     let collection = collection
         .or_else(|| file_config.as_ref().map(|c| c.sink.collection.clone()))
         .ok_or_else(|| {
             cli_config_error("missing required value: --collection or sink.collection in --config")
         })?;
+    if collection.trim().is_empty() {
+        return Err(cli_config_error("--collection or sink.collection is empty"));
+    }
     let state_path = state_path
         .or_else(|| file_config.as_ref().map(|c| c.state.path.clone()))
         .unwrap_or_else(|| DEFAULT_STATE_PATH.to_string());
@@ -307,6 +313,11 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
             let endpoint = openai_endpoint
                 .or_else(|| file_config.as_ref().map(|c| c.embed.endpoint.clone()))
                 .unwrap_or_else(|| "https://api.openai.com/v1/embeddings".to_string());
+            if endpoint.trim().is_empty() {
+                return Err(cli_config_error(
+                    "--openai-endpoint or embed.endpoint is empty",
+                ));
+            }
             let api_key = openai_api_key.ok_or_else(|| {
                 cli_config_error("missing required flag for openai backend: --openai-api-key")
             })?;
@@ -325,6 +336,9 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
                         "missing required value for http backend: --embed-url or embed.endpoint in --config",
                     )
                 })?;
+            if url.trim().is_empty() {
+                return Err(cli_config_error("--embed-url or embed.endpoint is empty"));
+            }
             let model = embed_model.unwrap_or_else(|| "default".to_string());
             EmbedBackend::Http { url, model }
         }
@@ -600,8 +614,14 @@ fn resolve_run_source(
     file_source: Option<&ragloom::config::SourceConfig>,
 ) -> Result<RunSource, RagloomError> {
     let source_kind_overridden = cli_source_kind.is_some();
+    let cli_dir_overrides_s3 = dir.is_some()
+        && !source_kind_overridden
+        && file_source
+            .map(|source| source.kind == ConfigSourceKind::S3)
+            .unwrap_or(false);
     let source_kind = match cli_source_kind {
         Some(kind) => parse_source_kind(kind)?,
+        None if dir.is_some() => ConfigSourceKind::Filesystem,
         None => file_source
             .map(|source| source.kind)
             .unwrap_or(ConfigSourceKind::Filesystem),
@@ -614,7 +634,8 @@ fn resolve_run_source(
                     "--s3-bucket and --s3-prefix require --source-kind s3",
                 ));
             }
-            if !source_kind_overridden
+            if !cli_dir_overrides_s3
+                && !source_kind_overridden
                 && file_source
                     .and_then(|source| source.bucket.as_deref())
                     .is_some()
@@ -623,7 +644,8 @@ fn resolve_run_source(
                     "source.bucket is only valid when source.kind=s3",
                 ));
             }
-            if !source_kind_overridden
+            if !cli_dir_overrides_s3
+                && !source_kind_overridden
                 && file_source
                     .and_then(|source| source.prefix.as_deref())
                     .is_some()
@@ -1560,6 +1582,41 @@ sink:
     }
 
     #[test]
+    fn parse_args_dir_overrides_configured_s3_source_kind() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  kind: s3
+  bucket: "docs-bucket"
+  prefix: "knowledge/"
+embed:
+  endpoint: "http://embed-from-config"
+sink:
+  qdrant_url: "http://qdrant-from-config"
+  collection: "from-config"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--dir".to_string(),
+            "/tmp/from-cli".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+        ];
+
+        let cfg = parse_args(&args).expect("config");
+        let ParsedCommand::Run(cfg) = cfg else {
+            panic!("expected run config");
+        };
+        assert_eq!(cfg.source, filesystem_source("/tmp/from-cli"));
+    }
+
+    #[test]
     fn parse_args_rejects_dir_with_s3_source_kind() {
         let args = vec![
             "ragloom".to_string(),
@@ -2425,6 +2482,102 @@ health:
         assert!(
             err.to_string()
                 .contains("--health-addr or health.addr is empty")
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_empty_yaml_embed_endpoint() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  root: "/tmp/from-config"
+embed:
+  endpoint: ""
+sink:
+  qdrant_url: "http://qdrant-from-config"
+  collection: "from-config"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("should fail validation");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(
+            err.to_string()
+                .contains("--embed-url or embed.endpoint is empty")
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_empty_yaml_qdrant_url() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  root: "/tmp/from-config"
+embed:
+  endpoint: "http://embed-from-config"
+sink:
+  qdrant_url: ""
+  collection: "from-config"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("should fail validation");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(
+            err.to_string()
+                .contains("--qdrant-url or sink.qdrant_url is empty")
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_empty_yaml_collection() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  root: "/tmp/from-config"
+embed:
+  endpoint: "http://embed-from-config"
+sink:
+  qdrant_url: "http://qdrant-from-config"
+  collection: ""
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("should fail validation");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(
+            err.to_string()
+                .contains("--collection or sink.collection is empty")
         );
     }
 
