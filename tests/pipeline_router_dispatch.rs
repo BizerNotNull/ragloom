@@ -70,6 +70,7 @@ async fn txt_gets_recursive_fingerprint() {
         canonical_path: "/tmp/notes.txt".into(),
         size_bytes: 1,
         mtime_unix_secs: 1,
+        etag: None,
     };
     let points = exec()
         .build_points_from_text(&fp, "plain text content here\n")
@@ -85,6 +86,7 @@ async fn md_gets_markdown_fingerprint() {
         canonical_path: "/tmp/notes.md".into(),
         size_bytes: 1,
         mtime_unix_secs: 1,
+        etag: None,
     };
     let points = exec()
         .build_points_from_text(&fp, "# Title\n\nSome body.\n")
@@ -100,6 +102,7 @@ async fn rs_gets_code_rust_fingerprint() {
         canonical_path: "/tmp/x.rs".into(),
         size_bytes: 1,
         mtime_unix_secs: 1,
+        etag: None,
     };
     let points = exec()
         .build_points_from_text(&fp, "fn a(){}\nfn b(){}\n")

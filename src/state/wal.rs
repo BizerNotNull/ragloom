@@ -231,7 +231,7 @@ fn open_wal_append_file(path: &Path) -> Result<File, RagloomError> {
 /// Returns unacked work in original append order.
 pub fn unacked_work_items(records: &[WalRecord]) -> Vec<WalRecord> {
     let mut acked_chunks = std::collections::HashSet::<[u8; 32]>::new();
-    let mut acked_files = std::collections::HashSet::<crate::ids::FileFingerprint>::new();
+    let mut acked_files = std::collections::HashSet::<[u8; 32]>::new();
     let mut pending_deletes = std::collections::HashMap::<String, (usize, WalRecord)>::new();
 
     for (idx, record) in records.iter().enumerate() {
@@ -240,7 +240,7 @@ pub fn unacked_work_items(records: &[WalRecord]) -> Vec<WalRecord> {
                 acked_chunks.insert(*chunk_id);
             }
             WalRecord::SinkAckV2 { fingerprint } => {
-                acked_files.insert(fingerprint.clone());
+                acked_files.insert(crate::ids::file_version_id(fingerprint));
             }
             WalRecord::DeleteDocument { canonical_path } => {
                 pending_deletes.insert(canonical_path.clone(), (idx, record.clone()));
@@ -259,7 +259,9 @@ pub fn unacked_work_items(records: &[WalRecord]) -> Vec<WalRecord> {
             WalRecord::WorkItem { chunk_id } if !acked_chunks.contains(chunk_id) => {
                 Some((idx, record.clone()))
             }
-            WalRecord::WorkItemV2 { fingerprint } if !acked_files.contains(fingerprint) => {
+            WalRecord::WorkItemV2 { fingerprint }
+                if !acked_files.contains(&crate::ids::file_version_id(fingerprint)) =>
+            {
                 Some((idx, record.clone()))
             }
             _ => None,
@@ -349,6 +351,7 @@ mod tests {
                 canonical_path: "/x/a.txt".to_string(),
                 size_bytes: 10,
                 mtime_unix_secs: 100,
+                etag: None,
             },
         })
         .expect("append work item v2");
@@ -362,6 +365,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 },
             }
         );
@@ -378,6 +382,7 @@ mod tests {
                 canonical_path: "/x/a.txt".to_string(),
                 size_bytes: 10,
                 mtime_unix_secs: 100,
+                etag: None,
             },
         })
         .expect("append work");
@@ -386,6 +391,7 @@ mod tests {
                 canonical_path: "/x/a.txt".to_string(),
                 size_bytes: 10,
                 mtime_unix_secs: 100,
+                etag: None,
             },
         })
         .expect("append ack");
@@ -399,6 +405,7 @@ mod tests {
                         canonical_path: "/x/a.txt".to_string(),
                         size_bytes: 10,
                         mtime_unix_secs: 100,
+                        etag: None,
                     },
                 },
                 WalRecord::SinkAckV2 {
@@ -406,6 +413,7 @@ mod tests {
                         canonical_path: "/x/a.txt".to_string(),
                         size_bytes: 10,
                         mtime_unix_secs: 100,
+                        etag: None,
                     },
                 },
             ]
@@ -418,11 +426,13 @@ mod tests {
             canonical_path: "/x/a.txt".to_string(),
             size_bytes: 10,
             mtime_unix_secs: 100,
+            etag: None,
         };
         let b = FileFingerprint {
             canonical_path: "/x/b.txt".to_string(),
             size_bytes: 20,
             mtime_unix_secs: 200,
+            etag: None,
         };
 
         let records = vec![
@@ -441,6 +451,31 @@ mod tests {
             unacked_work_items(&records),
             vec![WalRecord::WorkItemV2 { fingerprint: b }]
         );
+    }
+
+    #[test]
+    fn unacked_work_items_treats_quoted_and_unquoted_etag_as_same_version() {
+        let work = FileFingerprint {
+            canonical_path: "s3://docs-bucket/kb/a.md".to_string(),
+            size_bytes: 10,
+            mtime_unix_secs: 100,
+            etag: Some("\"etag-a\"".to_string()),
+        };
+        let ack = FileFingerprint {
+            canonical_path: "s3://docs-bucket/kb/a.md".to_string(),
+            size_bytes: 10,
+            mtime_unix_secs: 100,
+            etag: Some("etag-a".to_string()),
+        };
+
+        let records = vec![
+            WalRecord::WorkItemV2 {
+                fingerprint: work.clone(),
+            },
+            WalRecord::SinkAckV2 { fingerprint: ack },
+        ];
+
+        assert!(unacked_work_items(&records).is_empty());
     }
 
     #[test]
@@ -495,6 +530,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 },
             },
             WalRecord::SinkAckV2 {
@@ -502,6 +538,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 },
             },
         ];
@@ -520,6 +557,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 },
             },
             WalRecord::DeleteDocument {
@@ -541,6 +579,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 },
             },
             WalRecord::DeleteAck {
@@ -551,6 +590,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 11,
                     mtime_unix_secs: 101,
+                    etag: None,
                 },
             },
         ];
@@ -569,6 +609,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 },
             },
             WalRecord::DeleteDocument {
@@ -577,6 +618,23 @@ mod tests {
         ];
 
         assert!(known_live_document_paths(&records).is_empty());
+    }
+
+    #[test]
+    fn known_live_document_paths_tracks_s3_locator_without_normalizing_key() {
+        let records = vec![WalRecord::WorkItemV2 {
+            fingerprint: FileFingerprint {
+                canonical_path: "s3://docs-bucket/kb//a.md".to_string(),
+                size_bytes: 10,
+                mtime_unix_secs: 100,
+                etag: Some("\"etag-a\"".to_string()),
+            },
+        }];
+
+        assert_eq!(
+            known_live_document_paths(&records),
+            std::collections::HashSet::from(["s3://docs-bucket/kb//a.md".to_string()])
+        );
     }
 
     #[test]

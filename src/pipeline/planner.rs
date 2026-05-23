@@ -116,6 +116,7 @@ mod tests {
                 canonical_path: "/x/a.txt".to_string(),
                 size_bytes: 10,
                 mtime_unix_secs: 100,
+                etag: None,
             },
             file_version_id: version_id,
         }
@@ -142,6 +143,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 },
             }
         );
@@ -171,6 +173,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 },
             }
         );
@@ -232,6 +235,57 @@ mod tests {
                 },
                 WalRecord::DeleteDocument {
                     canonical_path: "/x/a.txt".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn planner_clears_pending_delete_when_s3_locator_is_rediscovered() {
+        let mut planner = Planner::new();
+        let wal = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::state::wal::InMemoryWal::new(),
+        ));
+
+        let canonical_path = "s3://docs-bucket/kb/a.md";
+        planner
+            .plan_file_delete(canonical_path, &wal)
+            .expect("first delete");
+
+        let discovered = FileVersionDiscovered {
+            fingerprint: FileFingerprint {
+                canonical_path: canonical_path.to_string(),
+                size_bytes: 10,
+                mtime_unix_secs: 100,
+                etag: Some("\"etag-a\"".to_string()),
+            },
+            file_version_id: crate::ids::file_version_id(&FileFingerprint {
+                canonical_path: canonical_path.to_string(),
+                size_bytes: 10,
+                mtime_unix_secs: 100,
+                etag: Some("\"etag-a\"".to_string()),
+            }),
+        };
+        planner
+            .plan_file_version(&discovered, &wal)
+            .expect("recreated file");
+
+        planner
+            .plan_file_delete(canonical_path, &wal)
+            .expect("second delete");
+
+        let records = wal.try_lock().expect("wal").read_all().expect("read all");
+        assert_eq!(
+            records,
+            vec![
+                WalRecord::DeleteDocument {
+                    canonical_path: canonical_path.to_string()
+                },
+                WalRecord::WorkItemV2 {
+                    fingerprint: discovered.fingerprint
+                },
+                WalRecord::DeleteDocument {
+                    canonical_path: canonical_path.to_string()
                 },
             ]
         );
