@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use ragloom::config::{DEFAULT_STATE_PATH, PipelineConfig};
+use ragloom::config::{DEFAULT_STATE_PATH, PipelineConfig, SourceKind as ConfigSourceKind};
 use ragloom::doc::FsUtf8Loader;
 use ragloom::embed::http_client::{HttpEmbeddingClient, HttpEmbeddingConfig};
 use ragloom::error::{RagloomError, RagloomErrorKind};
@@ -30,7 +30,7 @@ mod test_support;
 /// `main()` focused on wiring.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RunConfig {
-    pub dir: String,
+    pub source: RunSource,
     pub embed_backend: EmbedBackend,
     pub qdrant_url: String,
     pub collection: String,
@@ -55,7 +55,43 @@ pub struct RunConfig {
     pub retry_max_backoff_ms: u64,
 }
 
-const USAGE: &str = "usage: ragloom [--config <path>] --dir <path> --qdrant-url <url> --collection <name> [--state-path <path>] [--health-addr <host:port>] [--retry-max-attempts <n>] [--embed-backend <openai|http>]";
+/// Source selection constructed from CLI arguments and config.
+///
+/// # Why
+/// Keeping source selection explicit lets `main.rs` stay as a small composition
+/// layer while leaving room for future source kinds without pushing that logic
+/// into the runtime.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum RunSource {
+    Filesystem {
+        root: String,
+    },
+    S3 {
+        bucket: String,
+        prefix: Option<String>,
+    },
+}
+
+impl RunSource {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Filesystem { .. } => "filesystem",
+            Self::S3 { .. } => "s3",
+        }
+    }
+
+    fn log_target(&self) -> String {
+        match self {
+            Self::Filesystem { root } => root.clone(),
+            Self::S3 { bucket, prefix } => match prefix {
+                Some(prefix) => format!("s3://{bucket}/{prefix}"),
+                None => format!("s3://{bucket}"),
+            },
+        }
+    }
+}
+
+const USAGE: &str = "usage: ragloom [--config <path>] [--source-kind <filesystem|s3>] [--dir <path>] [--s3-bucket <name>] [--s3-prefix <prefix>] --qdrant-url <url> --collection <name> [--state-path <path>] [--health-addr <host:port>] [--retry-max-attempts <n>] [--embed-backend <openai|http>]";
 
 /// Top-level CLI command selected by argument parsing.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -92,7 +128,10 @@ pub enum EmbedBackend {
 /// deterministic unit tests for argument handling.
 pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
     let mut config_path: Option<String> = None;
+    let mut source_kind: Option<String> = None;
     let mut dir: Option<String> = None;
+    let mut s3_bucket: Option<String> = None;
+    let mut s3_prefix: Option<String> = None;
     let mut embed_backend: Option<String> = None;
 
     let mut embed_url: Option<String> = None;
@@ -134,7 +173,10 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
 
         match flag {
             "--config" => config_path = next_arg_value(inline_value, &mut iter),
+            "--source-kind" => source_kind = next_arg_value(inline_value, &mut iter),
             "--dir" => dir = next_arg_value(inline_value, &mut iter),
+            "--s3-bucket" => s3_bucket = next_arg_value(inline_value, &mut iter),
+            "--s3-prefix" => s3_prefix = next_arg_value(inline_value, &mut iter),
 
             "--embed-backend" => embed_backend = next_arg_value(inline_value, &mut iter),
 
@@ -203,22 +245,30 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         .map(load_pipeline_config)
         .transpose()?;
 
-    let dir = dir
-        .or_else(|| file_config.as_ref().map(|c| c.source.root.clone()))
-        .ok_or_else(|| {
-            cli_config_error("missing required value: --dir or source.root in --config")
-        })?;
+    let source = resolve_run_source(
+        source_kind.as_deref(),
+        dir,
+        s3_bucket,
+        s3_prefix,
+        file_config.as_ref().map(|cfg| &cfg.source),
+    )?;
 
     let qdrant_url = qdrant_url
         .or_else(|| file_config.as_ref().map(|c| c.sink.qdrant_url.clone()))
         .ok_or_else(|| {
             cli_config_error("missing required value: --qdrant-url or sink.qdrant_url in --config")
         })?;
+    if qdrant_url.trim().is_empty() {
+        return Err(cli_config_error("--qdrant-url or sink.qdrant_url is empty"));
+    }
     let collection = collection
         .or_else(|| file_config.as_ref().map(|c| c.sink.collection.clone()))
         .ok_or_else(|| {
             cli_config_error("missing required value: --collection or sink.collection in --config")
         })?;
+    if collection.trim().is_empty() {
+        return Err(cli_config_error("--collection or sink.collection is empty"));
+    }
     let state_path = state_path
         .or_else(|| file_config.as_ref().map(|c| c.state.path.clone()))
         .unwrap_or_else(|| DEFAULT_STATE_PATH.to_string());
@@ -251,7 +301,8 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
 
     tracing::info!(
         event.name = "ragloom.start",
-        dir = %dir,
+        source_kind = %source.kind(),
+        source_target = %source.log_target(),
         embed_backend = %backend,
         qdrant_collection = %collection,
         "ragloom.start"
@@ -262,6 +313,11 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
             let endpoint = openai_endpoint
                 .or_else(|| file_config.as_ref().map(|c| c.embed.endpoint.clone()))
                 .unwrap_or_else(|| "https://api.openai.com/v1/embeddings".to_string());
+            if endpoint.trim().is_empty() {
+                return Err(cli_config_error(
+                    "--openai-endpoint or embed.endpoint is empty",
+                ));
+            }
             let api_key = openai_api_key.ok_or_else(|| {
                 cli_config_error("missing required flag for openai backend: --openai-api-key")
             })?;
@@ -280,6 +336,9 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
                         "missing required value for http backend: --embed-url or embed.endpoint in --config",
                     )
                 })?;
+            if url.trim().is_empty() {
+                return Err(cli_config_error("--embed-url or embed.endpoint is empty"));
+            }
             let model = embed_model.unwrap_or_else(|| "default".to_string());
             EmbedBackend::Http { url, model }
         }
@@ -467,7 +526,7 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
     retry_policy.validate()?;
 
     Ok(ParsedCommand::Run(Box::new(RunConfig {
-        dir,
+        source,
         embed_backend,
         qdrant_url,
         collection,
@@ -499,13 +558,10 @@ fn load_pipeline_config(path: &str) -> Result<PipelineConfig, RagloomError> {
             .with_context(format!("failed to read config file: {path}"))
     })?;
 
-    let cfg = PipelineConfig::from_yaml_str(&yaml)
-        .map_err(|e| e.with_context(format!("failed to parse config file: {path}")))?;
-
-    cfg.validate()
-        .map_err(|e| e.with_context(format!("invalid config file: {path}")))?;
-
-    Ok(cfg)
+    // CLI flags are merged after file load, so parse the raw shape here and let
+    // the merged runtime configuration enforce the effective invariants.
+    PipelineConfig::from_yaml_str(&yaml)
+        .map_err(|e| e.with_context(format!("failed to parse config file: {path}")))
 }
 
 fn cli_invalid_input(message: impl Into<String>) -> RagloomError {
@@ -538,6 +594,116 @@ where
 fn cli_config_error(message: impl Into<String>) -> RagloomError {
     let message = message.into();
     RagloomError::from_kind(RagloomErrorKind::Config).with_context(format!("{message}\n{USAGE}"))
+}
+
+fn parse_source_kind(kind: &str) -> Result<ConfigSourceKind, RagloomError> {
+    match kind {
+        "filesystem" => Ok(ConfigSourceKind::Filesystem),
+        "s3" => Ok(ConfigSourceKind::S3),
+        other => Err(cli_invalid_input(format!(
+            "invalid value for --source-kind: {other} (expected: filesystem|s3)"
+        ))),
+    }
+}
+
+fn resolve_run_source(
+    cli_source_kind: Option<&str>,
+    dir: Option<String>,
+    s3_bucket: Option<String>,
+    s3_prefix: Option<String>,
+    file_source: Option<&ragloom::config::SourceConfig>,
+) -> Result<RunSource, RagloomError> {
+    let source_kind_overridden = cli_source_kind.is_some();
+    let cli_dir_overrides_s3 = dir.is_some()
+        && !source_kind_overridden
+        && file_source
+            .map(|source| source.kind == ConfigSourceKind::S3)
+            .unwrap_or(false);
+    let source_kind = match cli_source_kind {
+        Some(kind) => parse_source_kind(kind)?,
+        None if dir.is_some() => ConfigSourceKind::Filesystem,
+        None => file_source
+            .map(|source| source.kind)
+            .unwrap_or(ConfigSourceKind::Filesystem),
+    };
+
+    match source_kind {
+        ConfigSourceKind::Filesystem => {
+            if s3_bucket.is_some() || s3_prefix.is_some() {
+                return Err(cli_config_error(
+                    "--s3-bucket and --s3-prefix require --source-kind s3",
+                ));
+            }
+            if !cli_dir_overrides_s3
+                && !source_kind_overridden
+                && file_source
+                    .and_then(|source| source.bucket.as_deref())
+                    .is_some()
+            {
+                return Err(cli_config_error(
+                    "source.bucket is only valid when source.kind=s3",
+                ));
+            }
+            if !cli_dir_overrides_s3
+                && !source_kind_overridden
+                && file_source
+                    .and_then(|source| source.prefix.as_deref())
+                    .is_some()
+            {
+                return Err(cli_config_error(
+                    "source.prefix is only valid when source.kind=s3",
+                ));
+            }
+
+            let root = dir
+                .or_else(|| file_source.and_then(|source| source.root.clone()))
+                .ok_or_else(|| {
+                    cli_config_error("missing required value: --dir or source.root in --config")
+                })?;
+            if root.trim().is_empty() {
+                return Err(cli_config_error("--dir or source.root is empty"));
+            }
+
+            Ok(RunSource::Filesystem { root })
+        }
+        ConfigSourceKind::S3 => {
+            if dir.is_some() {
+                return Err(cli_config_error(
+                    "--dir is only valid when source.kind=filesystem",
+                ));
+            }
+            if !source_kind_overridden
+                && file_source
+                    .and_then(|source| source.root.as_deref())
+                    .is_some()
+            {
+                return Err(cli_config_error(
+                    "source.root is only valid when source.kind=filesystem",
+                ));
+            }
+
+            let bucket = s3_bucket
+                .or_else(|| file_source.and_then(|source| source.bucket.clone()))
+                .ok_or_else(|| {
+                    cli_config_error(
+                        "missing required value for s3 source: --s3-bucket or source.bucket in --config",
+                    )
+                })?;
+            if bucket.trim().is_empty() {
+                return Err(cli_config_error("--s3-bucket or source.bucket is empty"));
+            }
+
+            let prefix = s3_prefix.or_else(|| file_source.and_then(|source| source.prefix.clone()));
+            if prefix
+                .as_deref()
+                .is_some_and(|prefix| prefix.trim().is_empty())
+            {
+                return Err(cli_config_error("--s3-prefix or source.prefix is empty"));
+            }
+
+            Ok(RunSource::S3 { bucket, prefix })
+        }
+    }
 }
 
 fn parse_code_lang(s: &str) -> Result<ragloom::transform::chunker::code::Language, RagloomError> {
@@ -619,6 +785,38 @@ struct PreparedStartup {
     embedding: std::sync::Arc<dyn ragloom::embed::EmbeddingProvider + Send + Sync>,
     sink: QdrantSink,
     chunker: std::sync::Arc<dyn ragloom::transform::chunker::Chunker>,
+}
+
+struct PreparedSourceRuntime {
+    source: Box<dyn ragloom::source::Source + Send>,
+    loader: std::sync::Arc<dyn ragloom::doc::DocumentLoader + Send + Sync>,
+}
+
+fn prepare_source_and_loader(
+    cfg: &RunConfig,
+    previously_observed_paths: std::collections::HashSet<String>,
+) -> Result<PreparedSourceRuntime, RagloomError> {
+    match &cfg.source {
+        RunSource::Filesystem { root } => {
+            let source = DirectoryScannerSource::with_previously_observed_paths(
+                root,
+                previously_observed_paths,
+            )
+            .map_err(|e| {
+                RagloomError::new(RagloomErrorKind::Io, e)
+                    .with_context("failed to create directory scanner source")
+            })?;
+
+            Ok(PreparedSourceRuntime {
+                source: Box::new(source),
+                loader: std::sync::Arc::new(FsUtf8Loader),
+            })
+        }
+        RunSource::S3 { .. } => Err(RagloomError::from_kind(RagloomErrorKind::Config)
+            .with_context(
+                "s3 source wiring is not available yet; implementation is tracked by issue #108",
+            )),
+    }
 }
 
 async fn prepare_startup(cfg: &RunConfig) -> Result<PreparedStartup, RagloomError> {
@@ -889,12 +1087,14 @@ async fn try_main() -> Result<(), RagloomError> {
         }
     };
 
-    let source =
-        DirectoryScannerSource::with_previously_observed_paths(&cfg.dir, previously_observed_paths)
-            .map_err(|e| {
-                RagloomError::new(RagloomErrorKind::Io, e)
-                    .with_context("failed to create directory scanner source")
-            })?;
+    let PreparedSourceRuntime { source, loader } =
+        match prepare_source_and_loader(&cfg, previously_observed_paths) {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                health_state.mark_startup_failed();
+                return Err(err);
+            }
+        };
 
     let runtime = Runtime::with_shared_wal(source, std::sync::Arc::clone(&wal));
     let summary = IngestionSummary::default();
@@ -904,14 +1104,10 @@ async fn try_main() -> Result<(), RagloomError> {
         .start();
     let mut shutdown_for_monitor = shutdown.clone();
 
-    let pipeline = PipelineExecutor::with_chunker(
-        embedding,
-        std::sync::Arc::new(sink),
-        std::sync::Arc::new(FsUtf8Loader),
-        chunker,
-    )
-    .with_summary(summary.clone())
-    .with_metrics(metrics.clone());
+    let pipeline =
+        PipelineExecutor::with_chunker(embedding, std::sync::Arc::new(sink), loader, chunker)
+            .with_summary(summary.clone())
+            .with_metrics(metrics.clone());
 
     let executor = AckingExecutor {
         inner: pipeline,
@@ -980,6 +1176,12 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use crate::test_support::{TestHttpResponse, spawn_scripted_http_server};
+
+    fn filesystem_source(root: &str) -> RunSource {
+        RunSource::Filesystem {
+            root: root.to_string(),
+        }
+    }
 
     struct RequestCounterServer {
         stop: Sender<()>,
@@ -1079,7 +1281,7 @@ mod tests {
         assert_eq!(
             cfg,
             ParsedCommand::Run(Box::new(RunConfig {
-                dir: "/tmp/docs".to_string(),
+                source: filesystem_source("/tmp/docs"),
                 embed_backend: EmbedBackend::Http {
                     url: "http://embed".to_string(),
                     model: "default".to_string(),
@@ -1214,6 +1416,263 @@ mod tests {
             };
             assert_eq!(cfg.health_addr.as_deref(), Some("127.0.0.1:0"));
         }
+    }
+
+    #[test]
+    fn parse_args_accepts_explicit_filesystem_source_kind() {
+        let args = vec![
+            "ragloom".to_string(),
+            "--source-kind".to_string(),
+            "filesystem".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--embed-url".to_string(),
+            "http://embed".to_string(),
+            "--embed-model".to_string(),
+            "default".to_string(),
+            "--qdrant-url".to_string(),
+            "http://qdrant".to_string(),
+            "--collection".to_string(),
+            "docs".to_string(),
+        ];
+
+        let cfg = parse_args(&args).expect("config");
+        let ParsedCommand::Run(cfg) = cfg else {
+            panic!("expected run config");
+        };
+        assert_eq!(cfg.source, filesystem_source("/tmp/docs"));
+    }
+
+    #[test]
+    fn parse_args_rejects_s3_flags_without_s3_source_kind() {
+        let args = vec![
+            "ragloom".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+            "--s3-bucket".to_string(),
+            "docs-bucket".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--embed-url".to_string(),
+            "http://embed".to_string(),
+            "--embed-model".to_string(),
+            "default".to_string(),
+            "--qdrant-url".to_string(),
+            "http://qdrant".to_string(),
+            "--collection".to_string(),
+            "docs".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("expected config error");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(err.to_string().contains("--s3-bucket"));
+    }
+
+    #[test]
+    fn parse_args_loads_s3_source_from_yaml_config() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  kind: s3
+  bucket: "docs-bucket"
+  prefix: "knowledge/"
+embed:
+  endpoint: "http://embed-from-config"
+sink:
+  qdrant_url: "http://qdrant-from-config"
+  collection: "from-config"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+        ];
+
+        let cfg = parse_args(&args).expect("config");
+        let ParsedCommand::Run(cfg) = cfg else {
+            panic!("expected run config");
+        };
+        assert_eq!(
+            cfg.source,
+            RunSource::S3 {
+                bucket: "docs-bucket".to_string(),
+                prefix: Some("knowledge/".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_allows_cli_dir_to_complete_filesystem_source_config() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  kind: filesystem
+embed:
+  endpoint: "http://embed-from-config"
+sink:
+  qdrant_url: "http://qdrant-from-config"
+  collection: "from-config"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--dir".to_string(),
+            "/tmp/from-cli".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+        ];
+
+        let cfg = parse_args(&args).expect("config");
+        let ParsedCommand::Run(cfg) = cfg else {
+            panic!("expected run config");
+        };
+        assert_eq!(cfg.source, filesystem_source("/tmp/from-cli"));
+    }
+
+    #[test]
+    fn parse_args_allows_cli_bucket_to_complete_s3_source_config() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  kind: s3
+embed:
+  endpoint: "http://embed-from-config"
+sink:
+  qdrant_url: "http://qdrant-from-config"
+  collection: "from-config"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--s3-bucket".to_string(),
+            "docs-bucket".to_string(),
+        ];
+
+        let cfg = parse_args(&args).expect("config");
+        let ParsedCommand::Run(cfg) = cfg else {
+            panic!("expected run config");
+        };
+        assert_eq!(
+            cfg.source,
+            RunSource::S3 {
+                bucket: "docs-bucket".to_string(),
+                prefix: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_dir_overrides_configured_s3_source_kind() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  kind: s3
+  bucket: "docs-bucket"
+  prefix: "knowledge/"
+embed:
+  endpoint: "http://embed-from-config"
+sink:
+  qdrant_url: "http://qdrant-from-config"
+  collection: "from-config"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--dir".to_string(),
+            "/tmp/from-cli".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+        ];
+
+        let cfg = parse_args(&args).expect("config");
+        let ParsedCommand::Run(cfg) = cfg else {
+            panic!("expected run config");
+        };
+        assert_eq!(cfg.source, filesystem_source("/tmp/from-cli"));
+    }
+
+    #[test]
+    fn parse_args_rejects_dir_with_s3_source_kind() {
+        let args = vec![
+            "ragloom".to_string(),
+            "--source-kind".to_string(),
+            "s3".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+            "--s3-bucket".to_string(),
+            "docs-bucket".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--embed-url".to_string(),
+            "http://embed".to_string(),
+            "--embed-model".to_string(),
+            "default".to_string(),
+            "--qdrant-url".to_string(),
+            "http://qdrant".to_string(),
+            "--collection".to_string(),
+            "docs".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("expected config error");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(err.to_string().contains("--dir"));
+    }
+
+    #[test]
+    fn parse_args_rejects_invalid_filesystem_source_shape_without_override() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  kind: filesystem
+  bucket: "docs-bucket"
+embed:
+  endpoint: "http://embed-from-config"
+sink:
+  qdrant_url: "http://qdrant-from-config"
+  collection: "from-config"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--dir".to_string(),
+            "/tmp/from-cli".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("should fail source validation");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(err.to_string().contains("source.bucket"));
     }
 
     #[test]
@@ -1543,7 +2002,7 @@ mod tests {
     #[test]
     fn resolve_collection_vector_size_prefers_explicit_override() {
         let cfg = RunConfig {
-            dir: "/tmp/docs".to_string(),
+            source: filesystem_source("/tmp/docs"),
             embed_backend: EmbedBackend::OpenAi {
                 endpoint: "https://api.openai.com/v1/embeddings".to_string(),
                 api_key: "test-key".to_string(),
@@ -1579,7 +2038,7 @@ mod tests {
     #[test]
     fn resolve_collection_vector_size_infers_known_openai_model_size() {
         let mut cfg = RunConfig {
-            dir: "/tmp/docs".to_string(),
+            source: filesystem_source("/tmp/docs"),
             embed_backend: EmbedBackend::OpenAi {
                 endpoint: "https://api.openai.com/v1/embeddings".to_string(),
                 api_key: "test-key".to_string(),
@@ -1623,7 +2082,7 @@ mod tests {
     #[test]
     fn resolve_collection_vector_size_rejects_http_backend_without_override() {
         let cfg = RunConfig {
-            dir: "/tmp/docs".to_string(),
+            source: filesystem_source("/tmp/docs"),
             embed_backend: EmbedBackend::Http {
                 url: "http://embed".to_string(),
                 model: "default".to_string(),
@@ -1664,7 +2123,7 @@ mod tests {
     async fn prepare_startup_skips_bootstrap_when_embedding_client_construction_fails() {
         let (base_url, server) = spawn_qdrant_request_counter_server();
         let cfg = RunConfig {
-            dir: ".".to_string(),
+            source: filesystem_source("."),
             embed_backend: EmbedBackend::OpenAi {
                 endpoint: "https://api.openai.com/v1/embeddings".to_string(),
                 api_key: "bad\nkey".to_string(),
@@ -1718,7 +2177,7 @@ mod tests {
         let base_url = server.base_url();
 
         let cfg = RunConfig {
-            dir: "/tmp/docs".to_string(),
+            source: filesystem_source("/tmp/docs"),
             embed_backend: EmbedBackend::OpenAi {
                 endpoint: "https://api.openai.com/v1/embeddings".to_string(),
                 api_key: "test-key".to_string(),
@@ -1774,7 +2233,7 @@ mod tests {
         let base_url = server.base_url();
 
         let cfg = RunConfig {
-            dir: "/tmp/docs".to_string(),
+            source: filesystem_source("/tmp/docs"),
             embed_backend: EmbedBackend::Http {
                 url: "http://embed".to_string(),
                 model: "default".to_string(),
@@ -1823,7 +2282,7 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_collection_if_needed_surfaces_unknown_openai_model_with_config_context() {
         let cfg = RunConfig {
-            dir: "/tmp/docs".to_string(),
+            source: filesystem_source("/tmp/docs"),
             embed_backend: EmbedBackend::OpenAi {
                 endpoint: "https://api.openai.com/v1/embeddings".to_string(),
                 api_key: "test-key".to_string(),
@@ -1939,7 +2398,7 @@ health:
         let ParsedCommand::Run(cfg) = cfg else {
             panic!("expected run config");
         };
-        assert_eq!(cfg.dir, "/tmp/from-config");
+        assert_eq!(cfg.source, filesystem_source("/tmp/from-config"));
         assert_eq!(cfg.qdrant_url, "http://qdrant-from-config");
         assert_eq!(cfg.collection, "from-config");
         assert_eq!(cfg.state_path, ".state/from-config.ndjson");
@@ -2020,7 +2479,106 @@ health:
 
         let err = parse_args(&args).expect_err("should fail validation");
         assert_eq!(err.kind, RagloomErrorKind::Config);
-        assert!(err.to_string().contains("invalid config file"));
+        assert!(
+            err.to_string()
+                .contains("--health-addr or health.addr is empty")
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_empty_yaml_embed_endpoint() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  root: "/tmp/from-config"
+embed:
+  endpoint: ""
+sink:
+  qdrant_url: "http://qdrant-from-config"
+  collection: "from-config"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("should fail validation");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(
+            err.to_string()
+                .contains("--embed-url or embed.endpoint is empty")
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_empty_yaml_qdrant_url() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  root: "/tmp/from-config"
+embed:
+  endpoint: "http://embed-from-config"
+sink:
+  qdrant_url: ""
+  collection: "from-config"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("should fail validation");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(
+            err.to_string()
+                .contains("--qdrant-url or sink.qdrant_url is empty")
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_empty_yaml_collection() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+source:
+  root: "/tmp/from-config"
+embed:
+  endpoint: "http://embed-from-config"
+sink:
+  qdrant_url: "http://qdrant-from-config"
+  collection: ""
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("should fail validation");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(
+            err.to_string()
+                .contains("--collection or sink.collection is empty")
+        );
     }
 
     #[test]
@@ -2073,7 +2631,7 @@ sink:
 
         let err = parse_args(&args).expect_err("should fail validation");
         assert_eq!(err.kind, RagloomErrorKind::Config);
-        assert!(err.to_string().contains("invalid config file"));
+        assert!(err.to_string().contains("--dir or source.root is empty"));
     }
 
     #[test]
@@ -2103,5 +2661,47 @@ sink:
         let err = parse_args(&args).expect_err("should fail parse");
         assert_eq!(err.kind, RagloomErrorKind::Config);
         assert!(err.to_string().contains("failed to parse config file"));
+    }
+
+    #[test]
+    fn prepare_source_and_loader_rejects_s3_until_issue_108() {
+        let cfg = RunConfig {
+            source: RunSource::S3 {
+                bucket: "docs-bucket".to_string(),
+                prefix: Some("knowledge/".to_string()),
+            },
+            embed_backend: EmbedBackend::Http {
+                url: "http://embed".to_string(),
+                model: "default".to_string(),
+            },
+            qdrant_url: "http://qdrant".to_string(),
+            collection: "docs".to_string(),
+            state_path: DEFAULT_STATE_PATH.to_string(),
+            health_addr: None,
+            create_collection_if_missing: false,
+            collection_vector_size: None,
+            chunker_strategy: "recursive".to_string(),
+            size_metric: "chars".to_string(),
+            size_max: 2000,
+            size_min: 0,
+            size_overlap: 0,
+            tokenizer: "tiktoken-cl100k".to_string(),
+            chunker_mode: "router".to_string(),
+            chunker_single: None,
+            enable_semantic: false,
+            semantic_provider: "adapter".to_string(),
+            semantic_percentile: 95,
+            retry_max_attempts: 3,
+            retry_max_queued: 128,
+            retry_initial_backoff_ms: 100,
+            retry_max_backoff_ms: 2_000,
+        };
+
+        let err = match prepare_source_and_loader(&cfg, std::collections::HashSet::new()) {
+            Ok(_) => panic!("expected s3 placeholder error"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(err.to_string().contains("issue #108"));
     }
 }

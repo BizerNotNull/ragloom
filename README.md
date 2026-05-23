@@ -189,6 +189,7 @@ Ragloom supports a small typed YAML config for source, embed, and sink wiring.
 
 ```yaml
 source:
+  kind: "filesystem"
   root: "./docs"
 
 embed:
@@ -233,10 +234,15 @@ ragloom --config ./ragloom.yaml --embed-backend http --embed-model default
 
 ### Configuration notes
 
-- `--config` can provide `source.root`, `embed.endpoint`, `sink.qdrant_url`, and `sink.collection`
+- `source.kind: filesystem` plus `source.root` is the canonical filesystem config shape
+- legacy filesystem config that only sets `source.root` remains supported for compatibility
+- the config model reserves `source.kind: s3` plus `source.bucket` and optional `source.prefix`, but that source kind is not runnable in the current release line
+- `--config` can provide `source.kind`, `source.root`, `source.bucket`, `source.prefix`, `embed.endpoint`, `sink.qdrant_url`, and `sink.collection`
 - `--config` can also provide `state.path`; the CLI flag is `--state-path`
 - `--config` can provide `retry.max_attempts`, `retry.max_queued`, `retry.initial_backoff_ms`, and `retry.max_backoff_ms`
 - `--config` can provide `health.addr`; the CLI flag is `--health-addr`
+- `--dir` remains the filesystem CLI shorthand; `--source-kind filesystem --dir ./docs` is equivalent to filesystem config
+- `--s3-bucket` and `--s3-prefix` participate in source-shape validation and require `--source-kind s3`, but S3 runtime ingestion is still not available
 - backend-specific auth still comes from CLI flags, such as `--openai-api-key`
 - chunker settings are currently configured by CLI flags, not by YAML
 - flags support both `--flag value` and `--flag=value`
@@ -267,8 +273,12 @@ jitter-free so tests and local runs remain reproducible.
 
 ### Source scanning behavior
 
-The built-in filesystem source walks the configured root recursively and ingests
-regular files it can stat.
+The current built-in runtime source is the filesystem source. It walks the
+configured root recursively and ingests regular files it can stat.
+
+The config model now reserves a first-class `s3` source shape, but actual S3
+polling support is still tracked separately and is not yet runnable in the
+current release line.
 
 - traversal is deterministic because directory entries are processed in sorted path order
 - hidden files and hidden directories are treated like any other path

@@ -45,3 +45,9 @@ pub enum SourceEvent {
 pub trait Source {
     fn poll(&mut self) -> Vec<SourceEvent>;
 }
+
+impl<T: Source + ?Sized> Source for Box<T> {
+    fn poll(&mut self) -> Vec<SourceEvent> {
+        (**self).poll()
+    }
+}
