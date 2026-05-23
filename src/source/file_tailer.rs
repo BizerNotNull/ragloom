@@ -16,6 +16,7 @@ pub struct ObservedFileMeta {
     pub canonical_path: String,
     pub size_bytes: u64,
     pub mtime_unix_secs: i64,
+    pub etag: Option<String>,
 }
 
 impl ObservedFileMeta {
@@ -24,6 +25,7 @@ impl ObservedFileMeta {
             canonical_path: self.canonical_path.clone(),
             size_bytes: self.size_bytes,
             mtime_unix_secs: self.mtime_unix_secs,
+            etag: self.etag.clone(),
         }
     }
 }
@@ -123,6 +125,7 @@ mod tests {
             canonical_path: "/x/a.txt".to_string(),
             size_bytes: 10,
             mtime_unix_secs: 100,
+            etag: None,
         });
         assert_eq!(tailer.drain().len(), 1);
 
@@ -130,6 +133,7 @@ mod tests {
             canonical_path: "/x/a.txt".to_string(),
             size_bytes: 10,
             mtime_unix_secs: 100,
+            etag: None,
         });
         assert_eq!(tailer.drain().len(), 0);
     }
@@ -142,6 +146,7 @@ mod tests {
             canonical_path: "/x/a.txt".to_string(),
             size_bytes: 10,
             mtime_unix_secs: 100,
+            etag: None,
         });
         let first = tailer.drain();
         assert_eq!(first.len(), 1);
@@ -150,6 +155,7 @@ mod tests {
             canonical_path: "/x/a.txt".to_string(),
             size_bytes: 10,
             mtime_unix_secs: 101,
+            etag: None,
         });
         let second = tailer.drain();
         assert_eq!(second.len(), 1);
@@ -171,6 +177,7 @@ mod tests {
             canonical_path: "/x/a.txt".to_string(),
             size_bytes: 10,
             mtime_unix_secs: 100,
+            etag: None,
         });
         tailer.drain();
 
@@ -218,6 +225,7 @@ mod tests {
             canonical_path: "/x/a.txt".to_string(),
             size_bytes: 10,
             mtime_unix_secs: 100,
+            etag: None,
         });
         assert_eq!(tailer.drain().len(), 1);
 
@@ -225,7 +233,78 @@ mod tests {
             canonical_path: "/x/a.txt".to_string(),
             size_bytes: 10,
             mtime_unix_secs: 100,
+            etag: None,
         });
         assert!(tailer.drain().is_empty());
+    }
+
+    #[test]
+    fn s3_etag_change_emits_new_version_event() {
+        let mut tailer = FileTailer::new();
+
+        tailer.observe(ObservedFileMeta {
+            canonical_path: "s3://docs-bucket/kb/a.md".to_string(),
+            size_bytes: 10,
+            mtime_unix_secs: 100,
+            etag: Some("\"etag-a\"".to_string()),
+        });
+        assert_eq!(tailer.drain().len(), 1);
+
+        tailer.observe(ObservedFileMeta {
+            canonical_path: "s3://docs-bucket/kb/a.md".to_string(),
+            size_bytes: 10,
+            mtime_unix_secs: 100,
+            etag: Some("\"etag-b\"".to_string()),
+        });
+        assert_eq!(tailer.drain().len(), 1);
+    }
+
+    #[test]
+    fn s3_rename_behaves_as_delete_plus_new_document() {
+        let mut tailer = FileTailer::new();
+
+        let old_path = "s3://docs-bucket/kb/old.md".to_string();
+        let new_path = "s3://docs-bucket/kb/new.md".to_string();
+
+        tailer.observe(ObservedFileMeta {
+            canonical_path: old_path.clone(),
+            size_bytes: 10,
+            mtime_unix_secs: 100,
+            etag: Some("\"etag-a\"".to_string()),
+        });
+        tailer.drain();
+
+        let mut observed = HashSet::new();
+        observed.insert(new_path.clone());
+        tailer.observe(ObservedFileMeta {
+            canonical_path: new_path.clone(),
+            size_bytes: 10,
+            mtime_unix_secs: 100,
+            etag: Some("\"etag-a\"".to_string()),
+        });
+        tailer.complete_scan(&observed);
+
+        assert_eq!(
+            tailer.drain(),
+            vec![
+                SourceEvent::FileVersionDiscovered(FileVersionDiscovered {
+                    fingerprint: FileFingerprint {
+                        canonical_path: new_path,
+                        size_bytes: 10,
+                        mtime_unix_secs: 100,
+                        etag: Some("\"etag-a\"".to_string()),
+                    },
+                    file_version_id: crate::ids::file_version_id(&FileFingerprint {
+                        canonical_path: "s3://docs-bucket/kb/new.md".to_string(),
+                        size_bytes: 10,
+                        mtime_unix_secs: 100,
+                        etag: Some("\"etag-a\"".to_string()),
+                    }),
+                }),
+                SourceEvent::FileDeleted {
+                    canonical_path: old_path
+                }
+            ]
+        );
     }
 }

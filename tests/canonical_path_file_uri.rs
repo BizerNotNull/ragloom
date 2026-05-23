@@ -53,6 +53,7 @@ async fn payload_canonical_path_is_file_uri() {
         canonical_path: "D:/code\\repo\\a.txt".to_string(),
         size_bytes: 10,
         mtime_unix_secs: 100,
+        etag: None,
     };
 
     let points = executor

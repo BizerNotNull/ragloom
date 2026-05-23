@@ -210,6 +210,10 @@ fn uuid_from_path_chunk_strategy(
 }
 
 fn canonical_path_to_file_uri(canonical_path: &str) -> String {
+    if has_uri_scheme(canonical_path) {
+        return canonical_path.to_string();
+    }
+
     // Convert a canonical path into a normalized file:// URI.
     //
     // # Why
@@ -229,6 +233,22 @@ fn canonical_path_to_file_uri(canonical_path: &str) -> String {
 
     // Fallback: treat as already-absolute-ish path.
     format!("file:///{normalized}")
+}
+
+fn has_uri_scheme(value: &str) -> bool {
+    let Some((scheme, _rest)) = value.split_once("://") else {
+        return false;
+    };
+
+    let mut chars = scheme.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+
+    chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
 }
 
 fn doc_id_from_canonical_path(canonical_path_uri: &str) -> String {
@@ -1191,6 +1211,36 @@ mod tests {
     use crate::ids::FileFingerprint;
     use crate::source::{FileVersionDiscovered, SourceEvent};
 
+    #[test]
+    fn canonical_path_to_file_uri_preserves_s3_uri() {
+        assert_eq!(
+            canonical_path_to_file_uri("s3://docs-bucket/kb/a.md"),
+            "s3://docs-bucket/kb/a.md"
+        );
+    }
+
+    #[test]
+    fn canonical_path_to_file_uri_normalizes_local_path_with_scheme_like_segment() {
+        let uri = canonical_path_to_file_uri("/tmp/notes://draft.txt");
+
+        assert!(uri.starts_with("file://"));
+        assert!(uri.ends_with("/tmp/notes://draft.txt"));
+    }
+
+    #[test]
+    fn doc_id_from_canonical_path_uses_preserved_s3_uri() {
+        let canonical_path_uri = canonical_path_to_file_uri("s3://docs-bucket/kb/a.md");
+        let doc_id = doc_id_from_canonical_path(&canonical_path_uri);
+
+        assert_eq!(canonical_path_uri, "s3://docs-bucket/kb/a.md");
+        assert_eq!(
+            doc_id,
+            blake3::hash(b"s3://docs-bucket/kb/a.md")
+                .to_hex()
+                .to_string()
+        );
+    }
+
     #[derive(Debug, Default)]
     struct FakeSource {
         pending: Vec<SourceEvent>,
@@ -1204,6 +1254,7 @@ mod tests {
                         canonical_path: "/x/a.txt".to_string(),
                         size_bytes: 10,
                         mtime_unix_secs: 100,
+                        etag: None,
                     },
                     file_version_id,
                 }));
@@ -1252,6 +1303,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 },
             }
         );
@@ -1274,6 +1326,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 },
             }
         );
@@ -1286,6 +1339,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 },
             }
         );
@@ -1307,6 +1361,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 },
             }
         );
@@ -1339,6 +1394,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 },
             }
         );
@@ -1409,6 +1465,7 @@ mod tests {
             canonical_path: "/x/a.txt".to_string(),
             size_bytes: 10,
             mtime_unix_secs: 100,
+            etag: None,
         };
         {
             let mut guard = wal.lock().await;
@@ -1466,6 +1523,7 @@ mod tests {
                         canonical_path: "/x/a.txt".to_string(),
                         size_bytes: 10,
                         mtime_unix_secs: 100,
+                        etag: None,
                     }]
                 {
                     break;
@@ -1897,6 +1955,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 },
             })
             .await
@@ -1929,6 +1988,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 },
             })
             .await
@@ -1941,6 +2001,7 @@ mod tests {
                     canonical_path: "/x/a.txt".to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 }
             }),
             "expected SinkAckV2"
@@ -2017,6 +2078,7 @@ mod tests {
                 canonical_path: "/x/a.txt".to_string(),
                 size_bytes: 10,
                 mtime_unix_secs: 100,
+                etag: None,
             },
         })
         .await
@@ -2031,6 +2093,7 @@ mod tests {
                         canonical_path: "/x/a.txt".to_string(),
                         size_bytes: 10,
                         mtime_unix_secs: 100,
+                        etag: None,
                     },
                 }) {
                     break;
@@ -2069,6 +2132,7 @@ mod tests {
                 canonical_path: "/x/a.txt".to_string(),
                 size_bytes: 10,
                 mtime_unix_secs: 100,
+                etag: None,
             },
         })
         .await
@@ -2118,6 +2182,7 @@ mod tests {
                 canonical_path: "/x/a.txt".to_string(),
                 size_bytes: 10,
                 mtime_unix_secs: 100,
+                etag: None,
             },
         })
         .await
@@ -2164,6 +2229,7 @@ mod tests {
                 canonical_path: "/x/a.txt".to_string(),
                 size_bytes: 10,
                 mtime_unix_secs: 100,
+                etag: None,
             },
         })
         .await
@@ -2205,6 +2271,7 @@ mod tests {
                 canonical_path: "/x/a.txt".to_string(),
                 size_bytes: 10,
                 mtime_unix_secs: 100,
+                etag: None,
             },
         })
         .await
@@ -2248,6 +2315,7 @@ mod tests {
                 canonical_path: "/x/a.txt".to_string(),
                 size_bytes: 10,
                 mtime_unix_secs: 100,
+                etag: None,
             },
         })
         .await
@@ -2287,6 +2355,7 @@ mod tests {
                 canonical_path: "/x/a.txt".to_string(),
                 size_bytes: 10,
                 mtime_unix_secs: 100,
+                etag: None,
             },
         })
         .await

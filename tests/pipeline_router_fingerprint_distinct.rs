@@ -64,11 +64,13 @@ async fn md_and_rs_produce_disjoint_point_ids_from_same_text() {
         canonical_path: "/tmp/n.md".into(),
         size_bytes: 1,
         mtime_unix_secs: 1,
+        etag: None,
     };
     let rs_fp = FileFingerprint {
         canonical_path: "/tmp/n.rs".into(),
         size_bytes: 1,
         mtime_unix_secs: 1,
+        etag: None,
     };
 
     let md_pts = exec(Arc::clone(&router))

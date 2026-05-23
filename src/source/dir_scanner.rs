@@ -79,6 +79,7 @@ impl DirectoryScannerSource {
                 canonical_path,
                 size_bytes,
                 mtime_unix_secs,
+                etag: None,
             });
         });
         self.tailer.complete_scan(&observed_paths);

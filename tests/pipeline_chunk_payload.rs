@@ -54,6 +54,7 @@ async fn points_payload_includes_chunk_metadata_and_optional_text() {
             canonical_path: "/x/a.txt".to_string(),
             size_bytes: 10,
             mtime_unix_secs: 100,
+            etag: None,
         };
 
         let points = executor

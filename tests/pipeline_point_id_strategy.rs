@@ -66,6 +66,7 @@ async fn two_strategies_yield_distinct_point_ids() {
         canonical_path: "/tmp/x.txt".into(),
         size_bytes: 10,
         mtime_unix_secs: 1,
+        etag: None,
     };
     let text = "hello world. good morning. nice weather. lots of content here. \
                 and more prose. even more. still more. and yet more.";

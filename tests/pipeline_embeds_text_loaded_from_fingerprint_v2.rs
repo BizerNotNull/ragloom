@@ -20,6 +20,7 @@ impl FakeSource {
                     canonical_path: canonical_path.to_string(),
                     size_bytes: 10,
                     mtime_unix_secs: 100,
+                    etag: None,
                 },
                 file_version_id,
             }));

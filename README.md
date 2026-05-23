@@ -280,6 +280,10 @@ The config model now reserves a first-class `s3` source shape, but actual S3
 polling support is still tracked separately and is not yet runnable in the
 current release line.
 
+When S3 runtime ingestion lands, Ragloom will treat object keys as opaque. The
+canonical S3 document identity will be `s3://{bucket}/{exact-key}` without
+normalizing duplicate slashes, dot segments, or the configured prefix.
+
 - traversal is deterministic because directory entries are processed in sorted path order
 - hidden files and hidden directories are treated like any other path
 - symbolic links are not followed
@@ -381,9 +385,20 @@ Ragloom generates deterministic point IDs from:
 - chunk index
 - chunker strategy fingerprint
 
+For the current filesystem source, the canonical document identity starts from
+the local canonical path and is then rendered into a stable `file://` URI for
+sink payloads and `doc_id` derivation. For the reserved S3 source shape, the
+canonical document identity is defined directly as `s3://{bucket}/{exact-key}`.
+
 This makes reruns safe.
 
 The same file and same chunking config produce the same point IDs. Changing chunking parameters creates a new ID space, so old chunks are not silently overwritten by new content.
+
+File-version identity is source-specific metadata hashed together with that
+canonical document identity. Today the filesystem source uses path, size, and
+mtime. The S3 design uses canonical S3 identity, object size, last-modified
+time, and normalized ETag so the planner and WAL can preserve deterministic
+replay semantics without requiring a per-object `HEAD` request.
 
 ## Chunking
 
@@ -445,6 +460,16 @@ This is the part of Ragloom that makes inspection easier: you can look at a poin
 Ragloom tracks files it has previously observed under the configured source root. When a completed scan no longer sees one of those paths, the runtime plans a durable delete work item and the Qdrant sink removes all points with that document's stable `doc_id`.
 
 Delete synchronization is idempotent and replay-safe: rerunning the same delete work is expected to leave Qdrant in the same state. Ragloom does not delete points for files it has never observed, and this is document-level cleanup only; it does not create, drop, or otherwise manage whole collections.
+
+The same delete-sync model is reserved for S3: deletes are inferred only after
+a completed successful listing of the configured bucket and prefix. Missing
+objects from a partial or failed scan must not be treated as deletes.
+
+For S3 object lifecycle semantics, Ragloom treats object identity as path-like:
+
+- overwriting the same key is a new version of the same document when version metadata changes
+- renaming a key is modeled as deleting the old key and ingesting a new document at the new key
+- copying to a new key is modeled as a distinct document even if the content and ETag match
 
 ## Observability
 

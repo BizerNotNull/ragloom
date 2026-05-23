@@ -77,6 +77,7 @@ async fn default_and_semantic_routers_produce_disjoint_ids_for_md() {
         canonical_path: "/tmp/n.md".into(),
         size_bytes: 1,
         mtime_unix_secs: 1,
+        etag: None,
     };
 
     let default: Arc<dyn Chunker> = Arc::new(default_router(cfg()).unwrap());
