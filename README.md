@@ -693,7 +693,7 @@ Do not share command output if it includes credentials or other sensitive respon
 
 - only local filesystem and polling S3 input
 - only Qdrant as a built-in sink
-- only UTF-8 file loading
+- only UTF-8 text, Markdown, source code, and text-extractable PDF loading
 - no general collection lifecycle management beyond optional first-run bootstrap
 - no persistent dead-letter queue yet
 

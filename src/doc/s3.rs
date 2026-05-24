@@ -203,6 +203,6 @@ mod tests {
             .await
             .expect("load pdf");
 
-        assert_eq!(loaded.text.trim(), "Hello from S3 PDF");
+        assert_eq!(loaded.text, "\n\nHello from S3 PDF");
     }
 }
