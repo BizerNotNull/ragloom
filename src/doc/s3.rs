@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::doc::{DocumentLoader, LoadedDocument};
+use crate::doc::{DocumentLoader, LoadedDocument, extract_document_text};
 use crate::s3::{S3Client, parse_s3_uri};
 use crate::{RagloomError, RagloomErrorKind};
 
@@ -42,10 +42,7 @@ impl DocumentLoader for S3Utf8Loader {
                 RagloomError::new(e.kind, e).with_context("failed to load document bytes")
             })?;
 
-        let text = String::from_utf8(bytes).map_err(|e| {
-            RagloomError::new(RagloomErrorKind::InvalidInput, e)
-                .with_context("failed to extract UTF-8 text from document bytes")
-        })?;
+        let text = extract_document_text(path, bytes)?;
 
         Ok(LoadedDocument { text })
     }
@@ -56,6 +53,37 @@ mod tests {
     use super::*;
 
     use crate::s3::S3ObjectMeta;
+
+    fn minimal_pdf_bytes(stream: &str) -> Vec<u8> {
+        let objects = [
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_string(),
+            "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n".to_string(),
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n".to_string(),
+            format!(
+                "4 0 obj\n<< /Length {} >>\nstream\n{stream}endstream\nendobj\n",
+                stream.len()
+            ),
+            "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
+                .to_string(),
+        ];
+
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = vec![0usize];
+        for object in &objects {
+            offsets.push(pdf.len());
+            pdf.push_str(object);
+        }
+
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 6\n");
+        pdf.push_str("0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str("trailer\n<< /Root 1 0 R /Size 6 >>\n");
+        pdf.push_str(&format!("startxref\n{xref_offset}\n%%EOF\n"));
+        pdf.into_bytes()
+    }
 
     #[derive(Debug)]
     struct FakeS3Client {
@@ -161,5 +189,20 @@ mod tests {
 
         assert_eq!(err.kind, RagloomErrorKind::Io);
         assert!(err.to_string().contains("failed to load document bytes"));
+    }
+
+    #[tokio::test]
+    async fn extracts_pdf_text_from_s3_bytes() {
+        let loader = S3Utf8Loader::new(Arc::new(FakeS3Client {
+            bytes: minimal_pdf_bytes("BT\n/F1 18 Tf\n50 100 Td\n(Hello from S3 PDF) Tj\nET\n"),
+            fail_get_object: false,
+        }));
+
+        let loaded = loader
+            .load("s3://docs-bucket/kb/hello.pdf")
+            .await
+            .expect("load pdf");
+
+        assert_eq!(loaded.text.trim(), "Hello from S3 PDF");
     }
 }

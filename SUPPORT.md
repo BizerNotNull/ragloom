@@ -80,7 +80,7 @@ Release after the supported Linux and Windows assets have already published.
 Core support boundary maintainers are hardening for `v0.3` release-readiness:
 
 - local filesystem ingestion under one configured directory, plus polling S3 ingestion under one configured bucket/prefix
-- UTF-8 text, Markdown, and source code loading
+- UTF-8 text, Markdown, source code, and deterministic PDF text loading
 - recursive, Markdown-aware, and code-aware chunking
 - OpenAI and generic HTTP embedding backends
 - Qdrant sink behavior, deterministic point IDs, local WAL replay, bounded retry, and the loopback-only health and metrics endpoint
@@ -96,9 +96,13 @@ Experimental or best-effort paths:
 
 Out of scope for the current support contract:
 
-- PDF, DOCX, or broader parser guarantees
+- DOCX or broader parser guarantees
 - non-local operator surfaces
 - collection lifecycle management beyond optional first-run bootstrap of the configured target collection
+
+Current PDF support is limited to embedded text extraction. OCR, rich layout
+reconstruction, and guarantees for image-only, scan-only, encrypted, or
+otherwise unsupported PDFs remain outside the current support contract.
 
 ## Getting Help
 

@@ -33,7 +33,7 @@ Core path the project is hardening for v0.3 release-readiness:
 
 - local filesystem source
 - recursive scanning of regular files under one configured directory
-- UTF-8 text, Markdown, and source code files
+- UTF-8 text, Markdown, source code, and PDF files
 - recursive, Markdown-aware, and code-aware chunking
 - OpenAI and generic HTTP embedding APIs
 - Qdrant sink
@@ -54,7 +54,7 @@ Experimental or best-effort paths:
 
 Not supported yet:
 
-- PDF or DOCX parsing
+- DOCX parsing
 - persistent dead-letter queues
 - built-in collection lifecycle management
 
@@ -312,8 +312,14 @@ Discovers document versions from a location such as a local folder.
 
 ### Loader
 
-Reads document content. The built-in loaders currently extract UTF-8 text from
-local files and S3 objects behind the same document-loading boundary.
+Reads document content. The built-in loaders currently extract UTF-8 text and
+deterministic PDF text from local files and S3 objects behind the same
+document-loading boundary.
+
+PDF extraction is text-only. Ragloom does not perform OCR, does not reconstruct
+rich layout, and may return an empty string for image-only or scan-only PDFs.
+Encrypted or malformed PDFs fail at the loader boundary with project-level
+errors.
 
 ### Chunker
 
