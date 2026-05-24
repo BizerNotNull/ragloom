@@ -8,8 +8,13 @@ async fn points_payload_includes_chunk_metadata_and_optional_text() {
 
     #[async_trait::async_trait]
     impl ragloom::doc::DocumentLoader for StubDocumentLoader {
-        async fn load_utf8(&self, _path: &str) -> Result<String, ragloom::error::RagloomError> {
-            Ok("hello from stub loader".to_string())
+        async fn load(
+            &self,
+            _path: &str,
+        ) -> Result<ragloom::doc::LoadedDocument, ragloom::error::RagloomError> {
+            Ok(ragloom::doc::LoadedDocument {
+                text: "hello from stub loader".to_string(),
+            })
         }
     }
 
