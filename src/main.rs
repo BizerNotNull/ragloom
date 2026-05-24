@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use ragloom::config::{DEFAULT_STATE_PATH, PipelineConfig, SourceKind as ConfigSourceKind};
-use ragloom::doc::FsUtf8Loader;
+use ragloom::doc::{FsUtf8Loader, S3Utf8Loader};
 use ragloom::embed::http_client::{HttpEmbeddingClient, HttpEmbeddingConfig};
 use ragloom::error::{RagloomError, RagloomErrorKind};
 use ragloom::observability::health::{HealthServer, HealthState};
@@ -17,8 +17,10 @@ use ragloom::pipeline::runtime::{
     AckingExecutor, AsyncRuntime, IngestionSummary, PipelineExecutor, RetryPolicy, Runtime,
     RuntimeExitReason, run_worker_with_retry_and_metrics,
 };
+use ragloom::s3::{RustS3Client, S3Client};
 use ragloom::sink::qdrant::{QdrantConfig, QdrantSink};
 use ragloom::source::dir_scanner::DirectoryScannerSource;
+use ragloom::source::s3_scanner::S3PollingSource;
 
 #[cfg(test)]
 mod test_support;
@@ -796,6 +798,14 @@ fn prepare_source_and_loader(
     cfg: &RunConfig,
     previously_observed_paths: std::collections::HashSet<String>,
 ) -> Result<PreparedSourceRuntime, RagloomError> {
+    prepare_source_and_loader_with_s3_client(cfg, previously_observed_paths, None)
+}
+
+fn prepare_source_and_loader_with_s3_client(
+    cfg: &RunConfig,
+    previously_observed_paths: std::collections::HashSet<String>,
+    s3_client: Option<std::sync::Arc<dyn S3Client>>,
+) -> Result<PreparedSourceRuntime, RagloomError> {
     match &cfg.source {
         RunSource::Filesystem { root } => {
             let source = DirectoryScannerSource::with_previously_observed_paths(
@@ -812,10 +822,26 @@ fn prepare_source_and_loader(
                 loader: std::sync::Arc::new(FsUtf8Loader),
             })
         }
-        RunSource::S3 { .. } => Err(RagloomError::from_kind(RagloomErrorKind::Config)
-            .with_context(
-                "s3 source wiring is not available yet; implementation is tracked by issue #108",
-            )),
+        RunSource::S3 { bucket, prefix } => {
+            let client = match s3_client {
+                Some(client) => client,
+                None => std::sync::Arc::new(RustS3Client::from_default_env(bucket)?),
+            };
+            let source = S3PollingSource::with_previously_observed_paths(
+                bucket.clone(),
+                prefix.clone(),
+                std::sync::Arc::clone(&client),
+                previously_observed_paths,
+            )
+            .map_err(|e| {
+                RagloomError::new(e.kind, e).with_context("failed to create S3 polling source")
+            })?;
+
+            Ok(PreparedSourceRuntime {
+                source: Box::new(source),
+                loader: std::sync::Arc::new(S3Utf8Loader::new(client)),
+            })
+        }
     }
 }
 
@@ -2664,7 +2690,27 @@ sink:
     }
 
     #[test]
-    fn prepare_source_and_loader_rejects_s3_until_issue_108() {
+    fn prepare_source_and_loader_builds_s3_source_and_loader() {
+        #[derive(Debug)]
+        struct FakeS3Client;
+
+        impl ragloom::s3::S3Client for FakeS3Client {
+            fn bucket_name(&self) -> &str {
+                "docs-bucket"
+            }
+
+            fn list_objects(
+                &self,
+                _prefix: Option<&str>,
+            ) -> Result<Vec<ragloom::s3::S3ObjectMeta>, RagloomError> {
+                Ok(Vec::new())
+            }
+
+            fn get_object(&self, key: &str) -> Result<Vec<u8>, RagloomError> {
+                Ok(format!("loaded {key}").into_bytes())
+            }
+        }
+
         let cfg = RunConfig {
             source: RunSource::S3 {
                 bucket: "docs-bucket".to_string(),
@@ -2697,11 +2743,22 @@ sink:
             retry_max_backoff_ms: 2_000,
         };
 
-        let err = match prepare_source_and_loader(&cfg, std::collections::HashSet::new()) {
-            Ok(_) => panic!("expected s3 placeholder error"),
-            Err(err) => err,
-        };
-        assert_eq!(err.kind, RagloomErrorKind::Config);
-        assert!(err.to_string().contains("issue #108"));
+        let mut prepared = prepare_source_and_loader_with_s3_client(
+            &cfg,
+            std::collections::HashSet::new(),
+            Some(std::sync::Arc::new(FakeS3Client)),
+        )
+        .expect("prepare S3 source");
+
+        assert!(prepared.source.poll().is_empty());
+        let text = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(
+                prepared
+                    .loader
+                    .load_utf8("s3://docs-bucket/knowledge/hello.txt"),
+            )
+            .expect("load text");
+        assert_eq!(text, "loaded knowledge/hello.txt");
     }
 }
