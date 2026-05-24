@@ -13,6 +13,12 @@ allow = [
     "Unicode-3.0",
     "ISC",
 ]
+# rust-s3 currently pulls these transitively for sync HTTP transport and aws-creds.
+# Keep the exception scoped to the exact crates instead of globally allowing the licenses.
+exceptions = [
+    { crate = "attohttpc", allow = ["MPL-2.0"] },
+    { crate = "tiny-keccak", allow = ["CC0-1.0"] },
+]
 confidence-threshold = 0.8
 
 [bans]
