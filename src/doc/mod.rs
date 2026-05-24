@@ -1,6 +1,9 @@
 //! Document loading abstractions.
 
+use std::path::Path;
+
 use async_trait::async_trait;
+use pdf_extract::{Document as PdfDocument, Error as PdfError, OutputError as PdfOutputError};
 
 use crate::{RagloomError, RagloomErrorKind};
 
@@ -24,6 +27,50 @@ pub trait DocumentLoader: Send + Sync {
     async fn load(&self, path: &str) -> Result<LoadedDocument, RagloomError>;
 }
 
+pub(crate) fn extract_document_text(path: &str, bytes: Vec<u8>) -> Result<String, RagloomError> {
+    if is_pdf_path(path) {
+        return extract_pdf_text(&bytes);
+    }
+
+    String::from_utf8(bytes).map_err(|e| {
+        RagloomError::new(RagloomErrorKind::InvalidInput, e)
+            .with_context("failed to extract UTF-8 text from document bytes")
+    })
+}
+
+fn is_pdf_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+}
+
+fn extract_pdf_text(bytes: &[u8]) -> Result<String, RagloomError> {
+    let document = PdfDocument::load_mem(bytes).map_err(map_pdf_parse_error)?;
+    if document.is_encrypted() {
+        return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput)
+            .with_context("encrypted PDFs are not supported for text extraction"));
+    }
+
+    pdf_extract::extract_text_from_mem(bytes).map_err(map_pdf_extract_error)
+}
+
+fn map_pdf_parse_error(error: PdfError) -> RagloomError {
+    RagloomError::new(RagloomErrorKind::InvalidInput, error)
+        .with_context("failed to parse PDF document bytes")
+}
+
+fn map_pdf_extract_error(error: PdfOutputError) -> RagloomError {
+    let context = match &error {
+        PdfOutputError::PdfError(PdfError::UnsupportedSecurityHandler(_)) => {
+            "unsupported PDF security handler prevents text extraction"
+        }
+        _ => "failed to extract PDF text from document bytes",
+    };
+
+    RagloomError::new(RagloomErrorKind::InvalidInput, error).with_context(context)
+}
+
 /// Loads UTF-8 documents from the local filesystem.
 ///
 /// # Why
@@ -39,10 +86,7 @@ impl DocumentLoader for FsUtf8Loader {
             RagloomError::new(RagloomErrorKind::Io, e).with_context("failed to load document bytes")
         })?;
 
-        let text = String::from_utf8(bytes).map_err(|e| {
-            RagloomError::new(RagloomErrorKind::InvalidInput, e)
-                .with_context("failed to extract UTF-8 text from document bytes")
-        })?;
+        let text = extract_document_text(path, bytes)?;
 
         Ok(LoadedDocument { text })
     }
@@ -52,13 +96,76 @@ impl DocumentLoader for FsUtf8Loader {
 mod tests {
     use super::*;
 
+    fn write_test_file(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).expect("write test file");
+        path
+    }
+
+    fn minimal_pdf_bytes(stream: &str) -> Vec<u8> {
+        let objects = [
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_string(),
+            "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n".to_string(),
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n".to_string(),
+            format!(
+                "4 0 obj\n<< /Length {} >>\nstream\n{stream}endstream\nendobj\n",
+                stream.len()
+            ),
+            "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
+                .to_string(),
+        ];
+
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = vec![0usize];
+        for object in &objects {
+            offsets.push(pdf.len());
+            pdf.push_str(object);
+        }
+
+        let xref_offset = pdf.len();
+        pdf.push_str("xref\n0 6\n");
+        pdf.push_str("0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str("trailer\n<< /Root 1 0 R /Size 6 >>\n");
+        pdf.push_str(&format!("startxref\n{xref_offset}\n%%EOF\n"));
+        pdf.into_bytes()
+    }
+
+    fn encrypted_pdf_bytes() -> Vec<u8> {
+        let mut document = PdfDocument::load_mem(&minimal_pdf_bytes(
+            "BT\n/F1 18 Tf\n50 100 Td\n(Secret PDF) Tj\nET\n",
+        ))
+        .expect("parse plaintext pdf");
+        document.trailer.set(
+            "ID",
+            pdf_extract::Object::Array(vec![
+                pdf_extract::Object::string_literal(b"ABC"),
+                pdf_extract::Object::string_literal(b"DEF"),
+            ]),
+        );
+
+        let version = pdf_extract::EncryptionVersion::V2 {
+            document: &document,
+            owner_password: "owner",
+            user_password: "user",
+            key_length: 40,
+            permissions: pdf_extract::Permissions::all(),
+        };
+
+        let state = pdf_extract::EncryptionState::try_from(version).expect("build encryption");
+        document.encrypt(&state).expect("encrypt pdf");
+
+        let mut encrypted = Vec::new();
+        document.save_to(&mut encrypted).expect("serialize pdf");
+        encrypted
+    }
+
     #[tokio::test]
     async fn fs_utf8_loader_reads_text_file() {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let path = dir.path().join("hello.txt");
-        tokio::fs::write(&path, "hello\nworld")
-            .await
-            .expect("write file");
+        let path = write_test_file(&dir, "hello.txt", b"hello\nworld");
 
         let loader = FsUtf8Loader;
         let loaded = loader
@@ -87,10 +194,7 @@ mod tests {
     #[tokio::test]
     async fn fs_utf8_loader_surfaces_utf8_extraction_context() {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let path = dir.path().join("invalid.bin");
-        tokio::fs::write(&path, [0xff, 0xfe, 0xfd])
-            .await
-            .expect("write file");
+        let path = write_test_file(&dir, "invalid.bin", &[0xff, 0xfe, 0xfd]);
 
         let loader = FsUtf8Loader;
         let err = loader
@@ -102,6 +206,74 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("failed to extract UTF-8 text from document bytes")
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_utf8_loader_extracts_text_from_pdf() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = write_test_file(
+            &dir,
+            "hello.pdf",
+            &minimal_pdf_bytes("BT\n/F1 18 Tf\n50 100 Td\n(Hello PDF) Tj\nET\n"),
+        );
+
+        let loader = FsUtf8Loader;
+        let loaded = loader
+            .load(path.to_str().expect("utf-8 path"))
+            .await
+            .expect("load pdf");
+
+        assert_eq!(loaded.text, "\n\nHello PDF");
+    }
+
+    #[tokio::test]
+    async fn fs_utf8_loader_returns_empty_string_for_pdf_without_extractable_text() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = write_test_file(&dir, "empty.pdf", &minimal_pdf_bytes(""));
+
+        let loader = FsUtf8Loader;
+        let loaded = loader
+            .load(path.to_str().expect("utf-8 path"))
+            .await
+            .expect("load empty pdf");
+
+        assert_eq!(loaded.text, "");
+    }
+
+    #[tokio::test]
+    async fn fs_utf8_loader_rejects_malformed_pdf_with_context() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = write_test_file(&dir, "broken.pdf", b"%PDF-1.4\nnot a real pdf\n");
+
+        let loader = FsUtf8Loader;
+        let err = loader
+            .load(path.to_str().expect("utf-8 path"))
+            .await
+            .expect_err("expected malformed pdf to fail");
+
+        assert_eq!(err.kind, RagloomErrorKind::InvalidInput);
+        assert!(
+            err.to_string()
+                .contains("failed to parse PDF document bytes")
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_utf8_loader_rejects_encrypted_pdf_with_clear_error() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = write_test_file(&dir, "secret.pdf", &encrypted_pdf_bytes());
+
+        let loader = FsUtf8Loader;
+        let err = loader
+            .load(path.to_str().expect("utf-8 path"))
+            .await
+            .expect_err("expected encrypted pdf to fail");
+
+        assert_eq!(err.kind, RagloomErrorKind::InvalidInput);
+        assert!(
+            err.to_string()
+                .contains("encrypted PDFs are not supported for text extraction")
         );
     }
 }
