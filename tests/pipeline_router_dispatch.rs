@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use ragloom::RagloomError;
-use ragloom::doc::DocumentLoader;
+use ragloom::doc::{DocumentLoader, LoadedDocument};
 use ragloom::embed::EmbeddingProvider;
 use ragloom::ids::FileFingerprint;
 use ragloom::sink::{Sink, VectorPoint};
@@ -37,8 +37,10 @@ impl Sink for FakeSink {
 struct FakeLoader;
 #[async_trait]
 impl DocumentLoader for FakeLoader {
-    async fn load_utf8(&self, _path: &str) -> Result<String, RagloomError> {
-        Ok(String::new())
+    async fn load(&self, _path: &str) -> Result<LoadedDocument, RagloomError> {
+        Ok(LoadedDocument {
+            text: String::new(),
+        })
     }
 }
 

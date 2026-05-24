@@ -312,7 +312,8 @@ Discovers document versions from a location such as a local folder.
 
 ### Loader
 
-Reads document content. The built-in loader reads UTF-8 files from disk.
+Reads document content. The built-in loaders currently extract UTF-8 text from
+local files and S3 objects behind the same document-loading boundary.
 
 ### Chunker
 

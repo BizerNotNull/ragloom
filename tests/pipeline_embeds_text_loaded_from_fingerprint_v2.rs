@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ragloom::doc::DocumentLoader;
+use ragloom::doc::{DocumentLoader, LoadedDocument};
 use ragloom::pipeline::runtime::{
     AckingExecutor, AsyncRuntime, PipelineExecutor, Runtime, run_worker,
 };
@@ -66,9 +66,11 @@ struct StubLoader {
 
 #[async_trait::async_trait]
 impl DocumentLoader for StubLoader {
-    async fn load_utf8(&self, path: &str) -> Result<String, ragloom::RagloomError> {
+    async fn load(&self, path: &str) -> Result<LoadedDocument, ragloom::RagloomError> {
         self.calls.lock().await.push(path.to_string());
-        Ok("hello\nfrom\nloader".to_string())
+        Ok(LoadedDocument {
+            text: "hello\nfrom\nloader".to_string(),
+        })
     }
 }
 

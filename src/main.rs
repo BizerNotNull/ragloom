@@ -2753,12 +2753,8 @@ sink:
         assert!(prepared.source.poll().is_empty());
         let text = tokio::runtime::Runtime::new()
             .expect("runtime")
-            .block_on(
-                prepared
-                    .loader
-                    .load_utf8("s3://docs-bucket/knowledge/hello.txt"),
-            )
+            .block_on(prepared.loader.load("s3://docs-bucket/knowledge/hello.txt"))
             .expect("load text");
-        assert_eq!(text, "loaded knowledge/hello.txt");
+        assert_eq!(text.text, "loaded knowledge/hello.txt");
     }
 }

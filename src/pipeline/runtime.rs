@@ -809,14 +809,14 @@ impl WorkExecutor for PipelineExecutor {
                 )
                 .in_scope(|| async {
                     let load_elapsed = std::time::Instant::now();
-                    let text = match self.loader.load_utf8(&fingerprint.canonical_path).await {
-                        Ok(text) => {
+                    let document = match self.loader.load(&fingerprint.canonical_path).await {
+                        Ok(document) => {
                             tracing::debug!(
                                 canonical_path = fingerprint.canonical_path.as_str(),
                                 elapsed_ms = load_elapsed.elapsed().as_millis() as u64,
                                 "ragloom.doc.load_utf8"
                             );
-                            text
+                            document
                         }
                         Err(err) => {
                             tracing::warn!(
@@ -829,7 +829,10 @@ impl WorkExecutor for PipelineExecutor {
                         }
                     };
 
-                    let points = match self.build_points_from_text(&fingerprint, &text).await {
+                    let points = match self
+                        .build_points_from_text(&fingerprint, &document.text)
+                        .await
+                    {
                         Ok(points) => points,
                         Err(err) => {
                             tracing::warn!(
@@ -1547,8 +1550,13 @@ mod tests {
 
         #[async_trait::async_trait]
         impl crate::doc::DocumentLoader for StubDocumentLoader {
-            async fn load_utf8(&self, _path: &str) -> Result<String, crate::error::RagloomError> {
-                Ok("hello from stub loader".to_string())
+            async fn load(
+                &self,
+                _path: &str,
+            ) -> Result<crate::doc::LoadedDocument, crate::error::RagloomError> {
+                Ok(crate::doc::LoadedDocument {
+                    text: "hello from stub loader".to_string(),
+                })
             }
         }
 
@@ -1671,8 +1679,13 @@ mod tests {
 
         #[async_trait::async_trait]
         impl crate::doc::DocumentLoader for StubDocumentLoader {
-            async fn load_utf8(&self, _path: &str) -> Result<String, crate::error::RagloomError> {
-                Ok("hello from stub loader".to_string())
+            async fn load(
+                &self,
+                _path: &str,
+            ) -> Result<crate::doc::LoadedDocument, crate::error::RagloomError> {
+                Ok(crate::doc::LoadedDocument {
+                    text: "hello from stub loader".to_string(),
+                })
             }
         }
 
@@ -1790,8 +1803,13 @@ mod tests {
 
         #[async_trait::async_trait]
         impl crate::doc::DocumentLoader for StubDocumentLoader {
-            async fn load_utf8(&self, _path: &str) -> Result<String, crate::error::RagloomError> {
-                Ok("hello from stub loader".to_string())
+            async fn load(
+                &self,
+                _path: &str,
+            ) -> Result<crate::doc::LoadedDocument, crate::error::RagloomError> {
+                Ok(crate::doc::LoadedDocument {
+                    text: "hello from stub loader".to_string(),
+                })
             }
         }
 
@@ -1909,8 +1927,13 @@ mod tests {
 
         #[async_trait::async_trait]
         impl crate::doc::DocumentLoader for StubDocumentLoader {
-            async fn load_utf8(&self, _path: &str) -> Result<String, crate::error::RagloomError> {
-                Ok("hello from stub loader".to_string())
+            async fn load(
+                &self,
+                _path: &str,
+            ) -> Result<crate::doc::LoadedDocument, crate::error::RagloomError> {
+                Ok(crate::doc::LoadedDocument {
+                    text: "hello from stub loader".to_string(),
+                })
             }
         }
 
