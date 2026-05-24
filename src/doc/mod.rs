@@ -4,6 +4,9 @@ use async_trait::async_trait;
 
 use crate::{RagloomError, RagloomErrorKind};
 
+pub mod s3;
+pub use s3::S3Utf8Loader;
+
 /// Loads document bytes/text from a backing store.
 ///
 /// # Why

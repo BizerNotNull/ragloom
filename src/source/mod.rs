@@ -8,8 +8,10 @@
 
 pub mod dir_scanner;
 pub mod file_tailer;
+pub mod s3_scanner;
 
 pub use dir_scanner::DirectoryScannerSource;
+pub use s3_scanner::S3PollingSource;
 
 use crate::ids::FileFingerprint;
 

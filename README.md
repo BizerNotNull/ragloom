@@ -236,13 +236,14 @@ ragloom --config ./ragloom.yaml --embed-backend http --embed-model default
 
 - `source.kind: filesystem` plus `source.root` is the canonical filesystem config shape
 - legacy filesystem config that only sets `source.root` remains supported for compatibility
-- the config model reserves `source.kind: s3` plus `source.bucket` and optional `source.prefix`, but that source kind is not runnable in the current release line
+- `source.kind: s3` plus `source.bucket` and optional `source.prefix` configures polling S3 ingestion
 - `--config` can provide `source.kind`, `source.root`, `source.bucket`, `source.prefix`, `embed.endpoint`, `sink.qdrant_url`, and `sink.collection`
 - `--config` can also provide `state.path`; the CLI flag is `--state-path`
 - `--config` can provide `retry.max_attempts`, `retry.max_queued`, `retry.initial_backoff_ms`, and `retry.max_backoff_ms`
 - `--config` can provide `health.addr`; the CLI flag is `--health-addr`
 - `--dir` remains the filesystem CLI shorthand; `--source-kind filesystem --dir ./docs` is equivalent to filesystem config
-- `--s3-bucket` and `--s3-prefix` participate in source-shape validation and require `--source-kind s3`, but S3 runtime ingestion is still not available
+- `--s3-bucket` and `--s3-prefix` require `--source-kind s3`
+- S3 runtime auth and region come from the process environment; set `AWS_REGION` or `AWS_DEFAULT_REGION` plus your normal AWS credential chain inputs
 - backend-specific auth still comes from CLI flags, such as `--openai-api-key`
 - chunker settings are currently configured by CLI flags, not by YAML
 - flags support both `--flag value` and `--flag=value`
@@ -273,14 +274,12 @@ jitter-free so tests and local runs remain reproducible.
 
 ### Source scanning behavior
 
-The current built-in runtime source is the filesystem source. It walks the
-configured root recursively and ingests regular files it can stat.
+Ragloom ships with two polling source shapes:
 
-The config model now reserves a first-class `s3` source shape, but actual S3
-polling support is still tracked separately and is not yet runnable in the
-current release line.
+- filesystem: walks the configured root recursively and ingests regular files it can stat
+- s3: lists objects under the configured bucket and optional prefix, then ingests them through the same planner/runtime flow
 
-When S3 runtime ingestion lands, Ragloom will treat object keys as opaque. The
+For S3 runtime ingestion, Ragloom treats object keys as opaque. The
 canonical S3 document identity will be `s3://{bucket}/{exact-key}` without
 normalizing duplicate slashes, dot segments, or the configured prefix.
 
@@ -685,7 +684,7 @@ Do not share command output if it includes credentials or other sensitive respon
 
 ## Current limitations
 
-- only local filesystem input
+- only local filesystem and polling S3 input
 - only Qdrant as a built-in sink
 - only UTF-8 file loading
 - no general collection lifecycle management beyond optional first-run bootstrap

@@ -17,6 +17,7 @@ pub mod state;
 pub mod transform;
 
 pub mod observability;
+pub mod s3;
 
 #[cfg(test)]
 pub(crate) mod test_support;

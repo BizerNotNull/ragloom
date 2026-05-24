@@ -79,7 +79,7 @@ Release after the supported Linux and Windows assets have already published.
 
 Core support boundary maintainers are hardening for `v0.3` release-readiness:
 
-- local filesystem ingestion under one configured directory
+- local filesystem ingestion under one configured directory, plus polling S3 ingestion under one configured bucket/prefix
 - UTF-8 text, Markdown, and source code loading
 - recursive, Markdown-aware, and code-aware chunking
 - OpenAI and generic HTTP embedding backends
