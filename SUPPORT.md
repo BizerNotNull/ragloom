@@ -50,9 +50,9 @@ Each published archive also includes a matching `.sha256.txt` checksum file and
 `.spdx.json` SBOM. Release checksums are generated with a platform-aware
 command so Linux targets use `sha256sum` while macOS targets use `shasum -a 256`.
 
-## v0.3 Release Readiness
+## v0.4 Support Readiness
 
-For the stability-focused `v0.3` line, maintainers should treat the following
+For the current `v0.4` support surface, maintainers should treat the following
 as release-blocking for the commit being released:
 
 - `ci` is green for the release commit or release branch tip
@@ -77,7 +77,8 @@ Release after the supported Linux and Windows assets have already published.
 
 ## Feature Boundaries
 
-Core support boundary maintainers are hardening for `v0.3` release-readiness:
+Core support boundary maintainers are hardening for the current `v0.4`
+support boundary:
 
 - local filesystem ingestion under one configured directory, plus polling S3 ingestion under one configured bucket/prefix
 - UTF-8 text, Markdown, source code, deterministic PDF text loading, and deterministic DOCX text extraction
