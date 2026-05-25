@@ -33,7 +33,7 @@ Core path the project is hardening for v0.3 release-readiness:
 
 - local filesystem source
 - recursive scanning of regular files under one configured directory
-- UTF-8 text, Markdown, source code, and PDF files
+- UTF-8 text, Markdown, source code, PDF files, and deterministic DOCX text extraction
 - recursive, Markdown-aware, and code-aware chunking
 - OpenAI and generic HTTP embedding APIs
 - Qdrant sink
@@ -54,7 +54,6 @@ Experimental or best-effort paths:
 
 Not supported yet:
 
-- DOCX parsing
 - persistent dead-letter queues
 - built-in collection lifecycle management
 
@@ -312,14 +311,20 @@ Discovers document versions from a location such as a local folder.
 
 ### Loader
 
-Reads document content. The built-in loaders currently extract UTF-8 text and
-deterministic PDF text from local files and S3 objects behind the same
+Reads document content. The built-in loaders currently extract UTF-8 text,
+deterministic PDF text, and deterministic DOCX text from local files and S3
+objects behind the same
 document-loading boundary.
 
 PDF extraction is text-only. Ragloom does not perform OCR, does not reconstruct
 rich layout, and may return an empty string for image-only or scan-only PDFs.
 Encrypted or malformed PDFs fail at the loader boundary with project-level
 errors.
+
+DOCX extraction is also text-only. Ragloom linearizes paragraphs with newline
+separators and table cells with tab separators, does not preserve rich
+formatting or embedded assets, and fails malformed DOCX inputs at the loader
+boundary with project-level errors.
 
 ### Chunker
 
@@ -693,7 +698,7 @@ Do not share command output if it includes credentials or other sensitive respon
 
 - only local filesystem and polling S3 input
 - only Qdrant as a built-in sink
-- only UTF-8 text, Markdown, source code, and text-extractable PDF loading
+- only UTF-8 text, Markdown, source code, text-extractable PDF loading, and deterministic DOCX text extraction
 - no general collection lifecycle management beyond optional first-run bootstrap
 - no persistent dead-letter queue yet
 

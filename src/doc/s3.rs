@@ -50,9 +50,12 @@ impl DocumentLoader for S3Utf8Loader {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
 
     use crate::s3::S3ObjectMeta;
+    use zip::write::FileOptions;
 
     fn minimal_pdf_bytes(stream: &str) -> Vec<u8> {
         let objects = [
@@ -83,6 +86,53 @@ mod tests {
         pdf.push_str("trailer\n<< /Root 1 0 R /Size 6 >>\n");
         pdf.push_str(&format!("startxref\n{xref_offset}\n%%EOF\n"));
         pdf.into_bytes()
+    }
+
+    fn minimal_docx_bytes(paragraphs: &[&str]) -> Vec<u8> {
+        let body = paragraphs
+            .iter()
+            .map(|paragraph| format!("<w:p><w:r><w:t>{paragraph}</w:t></w:r></w:p>"))
+            .collect::<String>();
+        let document_xml = format!(
+            concat!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+                r#"<w:body>{}</w:body>"#,
+                r#"</w:document>"#
+            ),
+            format!("{body}<w:sectPr/>")
+        );
+
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = FileOptions::default();
+        zip.start_file("[Content_Types].xml", options)
+            .expect("start content types");
+        zip.write_all(
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"#,
+        )
+        .expect("write content types");
+        zip.add_directory("_rels/", options)
+            .expect("add rels directory");
+        zip.start_file("_rels/.rels", options).expect("start rels");
+        zip.write_all(
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#,
+        )
+        .expect("write rels");
+        zip.add_directory("word/", options)
+            .expect("add word directory");
+        zip.start_file("word/document.xml", options)
+            .expect("start document xml");
+        zip.write_all(document_xml.as_bytes())
+            .expect("write document xml");
+        zip.finish().expect("finish docx").into_inner()
     }
 
     #[derive(Debug)]
@@ -204,5 +254,39 @@ mod tests {
             .expect("load pdf");
 
         assert_eq!(loaded.text, "\n\nHello from S3 PDF");
+    }
+
+    #[tokio::test]
+    async fn extracts_docx_text_from_s3_bytes() {
+        let loader = S3Utf8Loader::new(Arc::new(FakeS3Client {
+            bytes: minimal_docx_bytes(&["Hello from S3 DOCX"]),
+            fail_get_object: false,
+        }));
+
+        let loaded = loader
+            .load("s3://docs-bucket/kb/hello.docx")
+            .await
+            .expect("load docx");
+
+        assert_eq!(loaded.text, "Hello from S3 DOCX\n");
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_docx_from_s3_with_context() {
+        let loader = S3Utf8Loader::new(Arc::new(FakeS3Client {
+            bytes: b"not a zip archive".to_vec(),
+            fail_get_object: false,
+        }));
+
+        let err = loader
+            .load("s3://docs-bucket/kb/broken.docx")
+            .await
+            .expect_err("expected malformed docx");
+
+        assert_eq!(err.kind, RagloomErrorKind::InvalidInput);
+        assert!(
+            err.to_string()
+                .contains("failed to extract DOCX text from document bytes")
+        );
     }
 }

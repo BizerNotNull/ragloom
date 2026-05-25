@@ -80,7 +80,7 @@ Release after the supported Linux and Windows assets have already published.
 Core support boundary maintainers are hardening for `v0.3` release-readiness:
 
 - local filesystem ingestion under one configured directory, plus polling S3 ingestion under one configured bucket/prefix
-- UTF-8 text, Markdown, source code, and deterministic PDF text loading
+- UTF-8 text, Markdown, source code, deterministic PDF text loading, and deterministic DOCX text extraction
 - recursive, Markdown-aware, and code-aware chunking
 - OpenAI and generic HTTP embedding backends
 - Qdrant sink behavior, deterministic point IDs, local WAL replay, bounded retry, and the loopback-only health and metrics endpoint
@@ -96,13 +96,17 @@ Experimental or best-effort paths:
 
 Out of scope for the current support contract:
 
-- DOCX or broader parser guarantees
+- broader parser guarantees beyond built-in DOCX text extraction
 - non-local operator surfaces
 - collection lifecycle management beyond optional first-run bootstrap of the configured target collection
 
 Current PDF support is limited to embedded text extraction. OCR, rich layout
 reconstruction, and guarantees for image-only, scan-only, encrypted, or
 otherwise unsupported PDFs remain outside the current support contract.
+
+Current DOCX support is limited to deterministic extracted text. Ragloom
+linearizes paragraphs and tables into chunkable text, but does not preserve
+rich formatting, embedded assets, or full page layout fidelity.
 
 ## Getting Help
 
