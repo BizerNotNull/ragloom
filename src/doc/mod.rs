@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use docx_lite::DocxError;
 use pdf_extract::{Document as PdfDocument, Error as PdfError, OutputError as PdfOutputError};
 
 use crate::{RagloomError, RagloomErrorKind};
@@ -31,6 +32,9 @@ pub(crate) fn extract_document_text(path: &str, bytes: Vec<u8>) -> Result<String
     if is_pdf_path(path) {
         return extract_pdf_text(&bytes);
     }
+    if is_docx_path(path) {
+        return extract_docx_text(&bytes);
+    }
 
     String::from_utf8(bytes).map_err(|e| {
         RagloomError::new(RagloomErrorKind::InvalidInput, e)
@@ -39,10 +43,18 @@ pub(crate) fn extract_document_text(path: &str, bytes: Vec<u8>) -> Result<String
 }
 
 fn is_pdf_path(path: &str) -> bool {
+    has_extension(path, "pdf")
+}
+
+fn is_docx_path(path: &str) -> bool {
+    has_extension(path, "docx")
+}
+
+fn has_extension(path: &str, extension: &str) -> bool {
     Path::new(path)
         .extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
 }
 
 fn extract_pdf_text(bytes: &[u8]) -> Result<String, RagloomError> {
@@ -53,6 +65,10 @@ fn extract_pdf_text(bytes: &[u8]) -> Result<String, RagloomError> {
     }
 
     pdf_extract::extract_text_from_mem(bytes).map_err(map_pdf_extract_error)
+}
+
+fn extract_docx_text(bytes: &[u8]) -> Result<String, RagloomError> {
+    docx_lite::extract_text_from_bytes(bytes).map_err(map_docx_extract_error)
 }
 
 fn map_pdf_parse_error(error: PdfError) -> RagloomError {
@@ -66,6 +82,19 @@ fn map_pdf_extract_error(error: PdfOutputError) -> RagloomError {
             "unsupported PDF security handler prevents text extraction"
         }
         _ => "failed to extract PDF text from document bytes",
+    };
+
+    RagloomError::new(RagloomErrorKind::InvalidInput, error).with_context(context)
+}
+
+fn map_docx_extract_error(error: DocxError) -> RagloomError {
+    let context = match &error {
+        DocxError::FileNotFound(path) => format!("DOCX is missing required OOXML part {path}"),
+        DocxError::UnsupportedFormat(message) => {
+            format!("unsupported DOCX format prevents text extraction: {message}")
+        }
+        DocxError::Structure(message) => format!("invalid DOCX structure: {message}"),
+        _ => "failed to extract DOCX text from document bytes".to_string(),
     };
 
     RagloomError::new(RagloomErrorKind::InvalidInput, error).with_context(context)
@@ -94,12 +123,89 @@ impl DocumentLoader for FsUtf8Loader {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
+    use zip::write::FileOptions;
 
     fn write_test_file(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> std::path::PathBuf {
         let path = dir.path().join(name);
         std::fs::write(&path, bytes).expect("write test file");
         path
+    }
+
+    fn minimal_docx_bytes(paragraphs: &[&str]) -> Vec<u8> {
+        let body = paragraphs
+            .iter()
+            .map(|paragraph| format!("<w:p><w:r><w:t>{paragraph}</w:t></w:r></w:p>"))
+            .collect::<String>();
+        let document_xml = format!(
+            concat!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+                r#"<w:body>{}</w:body>"#,
+                r#"</w:document>"#
+            ),
+            format!("{body}<w:sectPr/>")
+        );
+
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = FileOptions::default();
+        zip.start_file("[Content_Types].xml", options)
+            .expect("start content types");
+        zip.write_all(
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"#,
+        )
+        .expect("write content types");
+        zip.add_directory("_rels/", options)
+            .expect("add rels directory");
+        zip.start_file("_rels/.rels", options).expect("start rels");
+        zip.write_all(
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#,
+        )
+        .expect("write rels");
+        zip.add_directory("word/", options)
+            .expect("add word directory");
+        zip.start_file("word/document.xml", options)
+            .expect("start document xml");
+        zip.write_all(document_xml.as_bytes())
+            .expect("write document xml");
+        zip.finish().expect("finish docx").into_inner()
+    }
+
+    fn docx_without_document_xml_bytes() -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = FileOptions::default();
+        zip.start_file("[Content_Types].xml", options)
+            .expect("start content types");
+        zip.write_all(
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"#,
+        )
+        .expect("write content types");
+        zip.add_directory("_rels/", options)
+            .expect("add rels directory");
+        zip.start_file("_rels/.rels", options).expect("start rels");
+        zip.write_all(
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#,
+        )
+        .expect("write rels");
+        zip.finish().expect("finish docx").into_inner()
     }
 
     fn minimal_pdf_bytes(stream: &str) -> Vec<u8> {
@@ -274,6 +380,92 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("encrypted PDFs are not supported for text extraction")
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_utf8_loader_extracts_text_from_docx() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = write_test_file(
+            &dir,
+            "hello.docx",
+            &minimal_docx_bytes(&["Hello DOCX", "Second paragraph"]),
+        );
+
+        let loader = FsUtf8Loader;
+        let loaded = loader
+            .load(path.to_str().expect("utf-8 path"))
+            .await
+            .expect("load docx");
+
+        assert_eq!(loaded.text, "Hello DOCX\nSecond paragraph\n");
+    }
+
+    #[tokio::test]
+    async fn fs_utf8_loader_returns_empty_string_for_docx_without_extractable_text() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = write_test_file(&dir, "empty.docx", &minimal_docx_bytes(&[]));
+
+        let loader = FsUtf8Loader;
+        let loaded = loader
+            .load(path.to_str().expect("utf-8 path"))
+            .await
+            .expect("load empty docx");
+
+        assert_eq!(loaded.text, "");
+    }
+
+    #[tokio::test]
+    async fn fs_utf8_loader_extracts_docx_text_deterministically() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = write_test_file(&dir, "stable.docx", &minimal_docx_bytes(&["Stable text"]));
+
+        let loader = FsUtf8Loader;
+        let first = loader
+            .load(path.to_str().expect("utf-8 path"))
+            .await
+            .expect("first load");
+        let second = loader
+            .load(path.to_str().expect("utf-8 path"))
+            .await
+            .expect("second load");
+
+        assert_eq!(first.text, second.text);
+    }
+
+    #[tokio::test]
+    async fn fs_utf8_loader_rejects_malformed_docx_with_context() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = write_test_file(&dir, "broken.docx", b"not a zip archive");
+
+        let loader = FsUtf8Loader;
+        let err = loader
+            .load(path.to_str().expect("utf-8 path"))
+            .await
+            .expect_err("expected malformed docx to fail");
+
+        assert_eq!(err.kind, RagloomErrorKind::InvalidInput);
+        assert!(
+            err.to_string()
+                .contains("failed to extract DOCX text from document bytes")
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_utf8_loader_rejects_docx_missing_document_xml_with_clear_error() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = write_test_file(&dir, "missing.xml.docx", &docx_without_document_xml_bytes());
+
+        let loader = FsUtf8Loader;
+        let err = loader
+            .load(path.to_str().expect("utf-8 path"))
+            .await
+            .expect_err("expected missing document xml to fail");
+
+        assert_eq!(err.kind, RagloomErrorKind::InvalidInput);
+        assert!(
+            err.to_string()
+                .contains("DOCX is missing required OOXML part word/document.xml")
         );
     }
 }
