@@ -8,6 +8,7 @@
 
 pub mod dir_scanner;
 pub mod file_tailer;
+pub mod runtime;
 pub mod s3_scanner;
 
 pub use dir_scanner::DirectoryScannerSource;
