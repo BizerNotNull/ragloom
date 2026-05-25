@@ -7,8 +7,7 @@
 
 use std::time::Duration;
 
-use ragloom::config::{DEFAULT_STATE_PATH, PipelineConfig, SourceKind as ConfigSourceKind};
-use ragloom::doc::{FsUtf8Loader, S3Utf8Loader};
+use ragloom::config::{DEFAULT_STATE_PATH, PipelineConfig};
 use ragloom::embed::http_client::{HttpEmbeddingClient, HttpEmbeddingConfig};
 use ragloom::error::{RagloomError, RagloomErrorKind};
 use ragloom::observability::health::{HealthServer, HealthState};
@@ -17,10 +16,8 @@ use ragloom::pipeline::runtime::{
     AckingExecutor, AsyncRuntime, IngestionSummary, PipelineExecutor, RetryPolicy, Runtime,
     RuntimeExitReason, run_worker_with_retry_and_metrics,
 };
-use ragloom::s3::{RustS3Client, S3Client};
 use ragloom::sink::qdrant::{QdrantConfig, QdrantSink};
-use ragloom::source::dir_scanner::DirectoryScannerSource;
-use ragloom::source::s3_scanner::S3PollingSource;
+use ragloom::source::runtime::{RunSource, USAGE, prepare_source_runtime, resolve_run_source};
 
 #[cfg(test)]
 mod test_support;
@@ -56,44 +53,6 @@ pub struct RunConfig {
     pub retry_initial_backoff_ms: u64,
     pub retry_max_backoff_ms: u64,
 }
-
-/// Source selection constructed from CLI arguments and config.
-///
-/// # Why
-/// Keeping source selection explicit lets `main.rs` stay as a small composition
-/// layer while leaving room for future source kinds without pushing that logic
-/// into the runtime.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum RunSource {
-    Filesystem {
-        root: String,
-    },
-    S3 {
-        bucket: String,
-        prefix: Option<String>,
-    },
-}
-
-impl RunSource {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Filesystem { .. } => "filesystem",
-            Self::S3 { .. } => "s3",
-        }
-    }
-
-    fn log_target(&self) -> String {
-        match self {
-            Self::Filesystem { root } => root.clone(),
-            Self::S3 { bucket, prefix } => match prefix {
-                Some(prefix) => format!("s3://{bucket}/{prefix}"),
-                None => format!("s3://{bucket}"),
-            },
-        }
-    }
-}
-
-const USAGE: &str = "usage: ragloom [--config <path>] [--source-kind <filesystem|s3>] [--dir <path>] [--s3-bucket <name>] [--s3-prefix <prefix>] --qdrant-url <url> --collection <name> [--state-path <path>] [--health-addr <host:port>] [--retry-max-attempts <n>] [--embed-backend <openai|http>]";
 
 /// Top-level CLI command selected by argument parsing.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -598,116 +557,6 @@ fn cli_config_error(message: impl Into<String>) -> RagloomError {
     RagloomError::from_kind(RagloomErrorKind::Config).with_context(format!("{message}\n{USAGE}"))
 }
 
-fn parse_source_kind(kind: &str) -> Result<ConfigSourceKind, RagloomError> {
-    match kind {
-        "filesystem" => Ok(ConfigSourceKind::Filesystem),
-        "s3" => Ok(ConfigSourceKind::S3),
-        other => Err(cli_invalid_input(format!(
-            "invalid value for --source-kind: {other} (expected: filesystem|s3)"
-        ))),
-    }
-}
-
-fn resolve_run_source(
-    cli_source_kind: Option<&str>,
-    dir: Option<String>,
-    s3_bucket: Option<String>,
-    s3_prefix: Option<String>,
-    file_source: Option<&ragloom::config::SourceConfig>,
-) -> Result<RunSource, RagloomError> {
-    let source_kind_overridden = cli_source_kind.is_some();
-    let cli_dir_overrides_s3 = dir.is_some()
-        && !source_kind_overridden
-        && file_source
-            .map(|source| source.kind == ConfigSourceKind::S3)
-            .unwrap_or(false);
-    let source_kind = match cli_source_kind {
-        Some(kind) => parse_source_kind(kind)?,
-        None if dir.is_some() => ConfigSourceKind::Filesystem,
-        None => file_source
-            .map(|source| source.kind)
-            .unwrap_or(ConfigSourceKind::Filesystem),
-    };
-
-    match source_kind {
-        ConfigSourceKind::Filesystem => {
-            if s3_bucket.is_some() || s3_prefix.is_some() {
-                return Err(cli_config_error(
-                    "--s3-bucket and --s3-prefix require --source-kind s3",
-                ));
-            }
-            if !cli_dir_overrides_s3
-                && !source_kind_overridden
-                && file_source
-                    .and_then(|source| source.bucket.as_deref())
-                    .is_some()
-            {
-                return Err(cli_config_error(
-                    "source.bucket is only valid when source.kind=s3",
-                ));
-            }
-            if !cli_dir_overrides_s3
-                && !source_kind_overridden
-                && file_source
-                    .and_then(|source| source.prefix.as_deref())
-                    .is_some()
-            {
-                return Err(cli_config_error(
-                    "source.prefix is only valid when source.kind=s3",
-                ));
-            }
-
-            let root = dir
-                .or_else(|| file_source.and_then(|source| source.root.clone()))
-                .ok_or_else(|| {
-                    cli_config_error("missing required value: --dir or source.root in --config")
-                })?;
-            if root.trim().is_empty() {
-                return Err(cli_config_error("--dir or source.root is empty"));
-            }
-
-            Ok(RunSource::Filesystem { root })
-        }
-        ConfigSourceKind::S3 => {
-            if dir.is_some() {
-                return Err(cli_config_error(
-                    "--dir is only valid when source.kind=filesystem",
-                ));
-            }
-            if !source_kind_overridden
-                && file_source
-                    .and_then(|source| source.root.as_deref())
-                    .is_some()
-            {
-                return Err(cli_config_error(
-                    "source.root is only valid when source.kind=filesystem",
-                ));
-            }
-
-            let bucket = s3_bucket
-                .or_else(|| file_source.and_then(|source| source.bucket.clone()))
-                .ok_or_else(|| {
-                    cli_config_error(
-                        "missing required value for s3 source: --s3-bucket or source.bucket in --config",
-                    )
-                })?;
-            if bucket.trim().is_empty() {
-                return Err(cli_config_error("--s3-bucket or source.bucket is empty"));
-            }
-
-            let prefix = s3_prefix.or_else(|| file_source.and_then(|source| source.prefix.clone()));
-            if prefix
-                .as_deref()
-                .is_some_and(|prefix| prefix.trim().is_empty())
-            {
-                return Err(cli_config_error("--s3-prefix or source.prefix is empty"));
-            }
-
-            Ok(RunSource::S3 { bucket, prefix })
-        }
-    }
-}
-
 fn parse_code_lang(s: &str) -> Result<ragloom::transform::chunker::code::Language, RagloomError> {
     use ragloom::transform::chunker::code::Language;
     match s {
@@ -787,62 +636,6 @@ struct PreparedStartup {
     embedding: std::sync::Arc<dyn ragloom::embed::EmbeddingProvider + Send + Sync>,
     sink: QdrantSink,
     chunker: std::sync::Arc<dyn ragloom::transform::chunker::Chunker>,
-}
-
-struct PreparedSourceRuntime {
-    source: Box<dyn ragloom::source::Source + Send>,
-    loader: std::sync::Arc<dyn ragloom::doc::DocumentLoader + Send + Sync>,
-}
-
-fn prepare_source_and_loader(
-    cfg: &RunConfig,
-    previously_observed_paths: std::collections::HashSet<String>,
-) -> Result<PreparedSourceRuntime, RagloomError> {
-    prepare_source_and_loader_with_s3_client(cfg, previously_observed_paths, None)
-}
-
-fn prepare_source_and_loader_with_s3_client(
-    cfg: &RunConfig,
-    previously_observed_paths: std::collections::HashSet<String>,
-    s3_client: Option<std::sync::Arc<dyn S3Client>>,
-) -> Result<PreparedSourceRuntime, RagloomError> {
-    match &cfg.source {
-        RunSource::Filesystem { root } => {
-            let source = DirectoryScannerSource::with_previously_observed_paths(
-                root,
-                previously_observed_paths,
-            )
-            .map_err(|e| {
-                RagloomError::new(RagloomErrorKind::Io, e)
-                    .with_context("failed to create directory scanner source")
-            })?;
-
-            Ok(PreparedSourceRuntime {
-                source: Box::new(source),
-                loader: std::sync::Arc::new(FsUtf8Loader),
-            })
-        }
-        RunSource::S3 { bucket, prefix } => {
-            let client = match s3_client {
-                Some(client) => client,
-                None => std::sync::Arc::new(RustS3Client::from_default_env(bucket)?),
-            };
-            let source = S3PollingSource::with_previously_observed_paths(
-                bucket.clone(),
-                prefix.clone(),
-                std::sync::Arc::clone(&client),
-                previously_observed_paths,
-            )
-            .map_err(|e| {
-                RagloomError::new(e.kind, e).with_context("failed to create S3 polling source")
-            })?;
-
-            Ok(PreparedSourceRuntime {
-                source: Box::new(source),
-                loader: std::sync::Arc::new(S3Utf8Loader::new(client)),
-            })
-        }
-    }
 }
 
 async fn prepare_startup(cfg: &RunConfig) -> Result<PreparedStartup, RagloomError> {
@@ -1113,14 +906,13 @@ async fn try_main() -> Result<(), RagloomError> {
         }
     };
 
-    let PreparedSourceRuntime { source, loader } =
-        match prepare_source_and_loader(&cfg, previously_observed_paths) {
-            Ok(prepared) => prepared,
-            Err(err) => {
-                health_state.mark_startup_failed();
-                return Err(err);
-            }
-        };
+    let (source, loader) = match prepare_source_runtime(&cfg.source, previously_observed_paths) {
+        Ok(prepared) => prepared.into_parts(),
+        Err(err) => {
+            health_state.mark_startup_failed();
+            return Err(err);
+        }
+    };
 
     let runtime = Runtime::with_shared_wal(source, std::sync::Arc::clone(&wal));
     let summary = IngestionSummary::default();
@@ -2687,74 +2479,5 @@ sink:
         let err = parse_args(&args).expect_err("should fail parse");
         assert_eq!(err.kind, RagloomErrorKind::Config);
         assert!(err.to_string().contains("failed to parse config file"));
-    }
-
-    #[test]
-    fn prepare_source_and_loader_builds_s3_source_and_loader() {
-        #[derive(Debug)]
-        struct FakeS3Client;
-
-        impl ragloom::s3::S3Client for FakeS3Client {
-            fn bucket_name(&self) -> &str {
-                "docs-bucket"
-            }
-
-            fn list_objects(
-                &self,
-                _prefix: Option<&str>,
-            ) -> Result<Vec<ragloom::s3::S3ObjectMeta>, RagloomError> {
-                Ok(Vec::new())
-            }
-
-            fn get_object(&self, key: &str) -> Result<Vec<u8>, RagloomError> {
-                Ok(format!("loaded {key}").into_bytes())
-            }
-        }
-
-        let cfg = RunConfig {
-            source: RunSource::S3 {
-                bucket: "docs-bucket".to_string(),
-                prefix: Some("knowledge/".to_string()),
-            },
-            embed_backend: EmbedBackend::Http {
-                url: "http://embed".to_string(),
-                model: "default".to_string(),
-            },
-            qdrant_url: "http://qdrant".to_string(),
-            collection: "docs".to_string(),
-            state_path: DEFAULT_STATE_PATH.to_string(),
-            health_addr: None,
-            create_collection_if_missing: false,
-            collection_vector_size: None,
-            chunker_strategy: "recursive".to_string(),
-            size_metric: "chars".to_string(),
-            size_max: 2000,
-            size_min: 0,
-            size_overlap: 0,
-            tokenizer: "tiktoken-cl100k".to_string(),
-            chunker_mode: "router".to_string(),
-            chunker_single: None,
-            enable_semantic: false,
-            semantic_provider: "adapter".to_string(),
-            semantic_percentile: 95,
-            retry_max_attempts: 3,
-            retry_max_queued: 128,
-            retry_initial_backoff_ms: 100,
-            retry_max_backoff_ms: 2_000,
-        };
-
-        let mut prepared = prepare_source_and_loader_with_s3_client(
-            &cfg,
-            std::collections::HashSet::new(),
-            Some(std::sync::Arc::new(FakeS3Client)),
-        )
-        .expect("prepare S3 source");
-
-        assert!(prepared.source.poll().is_empty());
-        let text = tokio::runtime::Runtime::new()
-            .expect("runtime")
-            .block_on(prepared.loader.load("s3://docs-bucket/knowledge/hello.txt"))
-            .expect("load text");
-        assert_eq!(text.text, "loaded knowledge/hello.txt");
     }
 }
