@@ -8,7 +8,7 @@ The local verification commands are:
 
 - `cargo qa`: the fast default contributor gate
 - `cargo maintainer-qa`: the authoritative deeper maintainer gate for
-  release-sensitive and v0.3 stability work
+  release-sensitive and current support-boundary work
 
 `cargo qa` runs:
 

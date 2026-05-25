@@ -27,13 +27,15 @@ Ragloom is currently alpha software.
 
 It is useful for local-folder to Qdrant ingestion experiments and small automation tasks.
 
-The v0.3 direction is to harden a narrow core instead of widening scope.
+The v0.4 direction is to widen the ingestion surface carefully without losing
+the project's explicit support boundaries.
 
-Core path the project is hardening for v0.3 release-readiness:
+Core path the project is hardening for the current v0.4 support boundary:
 
 - local filesystem source
+- polling S3 source
 - recursive scanning of regular files under one configured directory
-- UTF-8 text, Markdown, source code, PDF files, and deterministic DOCX text extraction
+- UTF-8 text, Markdown, source code, text-extractable PDF loading, and deterministic DOCX text extraction
 - recursive, Markdown-aware, and code-aware chunking
 - OpenAI and generic HTTP embedding APIs
 - Qdrant sink
@@ -56,6 +58,14 @@ Not supported yet:
 
 - persistent dead-letter queues
 - built-in collection lifecycle management
+
+### v0.4 support matrix
+
+| Area | Supported in v0.4 | Explicitly out of scope |
+| --- | --- | --- |
+| sources | local filesystem, polling S3 | non-S3 remote sources |
+| document loading | UTF-8 text, Markdown, source code, embedded-text PDF extraction, deterministic DOCX text extraction | OCR, rich layout reconstruction, broader office-suite parsing |
+| operations | local health endpoint, local metrics endpoint, optional first-run collection bootstrap | non-local operator surfaces, broader collection lifecycle management |
 
 ## Quickstart
 
@@ -216,6 +226,36 @@ Run with:
 
 ```bash
 ragloom --config ./ragloom.yaml --openai-api-key "$OPENAI_API_KEY"
+```
+
+### S3 source configuration
+
+For polling S3 ingestion, use the canonical S3 config shape:
+
+```yaml
+source:
+  kind: "s3"
+  bucket: "docs-bucket"
+  prefix: "kb/"
+
+embed:
+  endpoint: "https://api.openai.com/v1/embeddings"
+
+sink:
+  qdrant_url: "http://localhost:6333"
+  collection: "docs"
+```
+
+Example CLI startup for the same source:
+
+```bash
+ragloom \
+  --source-kind s3 \
+  --s3-bucket docs-bucket \
+  --s3-prefix kb/ \
+  --qdrant-url http://localhost:6333 \
+  --collection docs \
+  --openai-api-key "$OPENAI_API_KEY"
 ```
 
 ### Generic HTTP embedding
@@ -599,13 +639,13 @@ Status: shipped in `v0.2.0`, with restart-safe delete synchronization refined in
 - health endpoint
 - metrics endpoint
 
-### v0.3 - Stability, workflow, and code quality hardening
+### v0.4 - Explicit platform expansion boundaries
 
-- keep the local-filesystem to Qdrant path release-ready on supported Linux and Windows targets
+- keep the local-filesystem and polling-S3 ingest paths release-ready on supported Linux and Windows targets
 - require green `ci` and `quality-deep` workflow states, or equivalent local maintainer verification, before cutting the release
 - keep feature-gated paths such as `fastembed` exercised by dedicated checks without making them the default runtime path
-- document experimental and best-effort boundaries explicitly instead of implying broader parser or platform guarantees
-- defer broader document-format expansion until the existing ingestion path is easier to verify and ship repeatedly
+- document PDF and DOCX extraction limits explicitly instead of implying broader parser guarantees
+- keep remote-source scope narrow by supporting S3 only rather than expanding into a general remote-ingestion platform
 
 ## Limitations
 
@@ -723,7 +763,7 @@ Before opening a pull request, run:
 cargo qa
 ```
 
-Maintainers preparing release-sensitive or v0.3 stability work should also run
+Maintainers preparing release-sensitive or v0.4 support-boundary work should also run
 the authoritative deeper local gate:
 
 ```bash

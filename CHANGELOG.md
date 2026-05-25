@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Docs
+- Aligned the `README.md`, `SUPPORT.md`, and `CHANGELOG.md` support story around
+  the current `v0.4` source and document support matrix instead of the older
+  `v0.3` framing.
+- Added a concrete polling S3 configuration example plus explicit operator
+  limits for PDF text extraction, DOCX text extraction, and out-of-scope remote
+  sources.
+
 ## [0.3.0] - 2026-05-22
 
 ### Docs
