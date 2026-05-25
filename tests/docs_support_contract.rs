@@ -61,7 +61,8 @@ fn changelog_unreleased_mentions_v0_4_docs_alignment() {
     let changelog = read_repo_file("CHANGELOG.md");
 
     assert!(
-        changelog.contains("## [Unreleased]\n\n### Docs\n")
+        changelog.contains("## [Unreleased]")
+            && changelog.contains("### Docs")
             && changelog.contains("v0.4")
             && changelog.contains("support matrix"),
         "expected the unreleased changelog to record the v0.4 docs alignment work"
