@@ -2,13 +2,30 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-26
+
+### Added
+- Polling S3 source support, including typed source configuration, runtime
+  wiring, stable source identity semantics, and deterministic planner/WAL
+  integration for one configured bucket and prefix.
+- Deterministic PDF embedded-text extraction and deterministic DOCX text
+  extraction within the document loading boundary.
+
+### Changed
+- Broadened the document loader boundary to support built-in UTF-8 text,
+  Markdown, source code, PDF, and DOCX ingestion without changing the
+  chunking, embedding, sink, or deterministic point-ID architecture.
+- Moved source runtime helpers into the library crate so CLI wiring in
+  `src/main.rs` stays thinner and reusable runtime behavior remains testable.
+
+### Fixed
+- Pinned the `fastembed` pull-request checkout path in `quality-deep` so
+  release-critical PR validation keeps testing the intended merge ref.
+
 ### Docs
-- Aligned the `README.md`, `SUPPORT.md`, and `CHANGELOG.md` support story around
-  the current `v0.4` source and document support matrix instead of the older
-  `v0.3` framing.
-- Added a concrete polling S3 configuration example plus explicit operator
-  limits for PDF text extraction, DOCX text extraction, and out-of-scope remote
-  sources.
+- Aligned `README.md`, `SUPPORT.md`, and `CHANGELOG.md` around the released
+  `v0.4` support matrix, including a concrete polling S3 example plus explicit
+  PDF, DOCX, and out-of-scope remote-source limits.
 
 ## [0.3.0] - 2026-05-22
 
