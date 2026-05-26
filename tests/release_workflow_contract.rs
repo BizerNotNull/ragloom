@@ -220,6 +220,16 @@ fn quality_deep_workflow_exposes_pre_merge_stability_gate() {
     let loom_yaml = serde_yaml::to_string(loom).expect("serialize loom job");
     let docs_and_security_yaml =
         serde_yaml::to_string(docs_and_security).expect("serialize docs-and-security job");
+    let fastembed_steps = fastembed
+        .get(serde_yaml::Value::String("steps".to_string()))
+        .and_then(serde_yaml::Value::as_sequence)
+        .expect("expected fastembed job to define steps");
+    let fastembed_checkout = fastembed_steps
+        .iter()
+        .find(|step| step.get("name").and_then(serde_yaml::Value::as_str) == Some("Checkout"))
+        .expect("expected fastembed job to define a Checkout step");
+    let fastembed_checkout_yaml =
+        serde_yaml::to_string(fastembed_checkout).expect("serialize fastembed checkout step");
 
     assert!(
         fastembed_yaml.contains("cargo build --features fastembed")
@@ -235,6 +245,18 @@ fn quality_deep_workflow_exposes_pre_merge_stability_gate() {
             && docs_and_security_yaml.contains("cargo audit")
             && docs_and_security_yaml.contains("cargo doc --workspace --no-deps"),
         "expected PR-visible stability checks to cover docs, cargo-deny, and cargo-audit"
+    );
+    assert!(
+        fastembed_checkout_yaml.contains("persist-credentials: false"),
+        "expected fastembed checkout to preserve disabled credential persistence"
+    );
+    assert!(
+        fastembed_checkout_yaml.contains("ref: ${{ github.ref }}"),
+        "expected fastembed checkout to pin pull_request runs to the merge ref explicitly"
+    );
+    assert!(
+        !workflow_yaml.contains("pull_request_target"),
+        "expected deep quality workflow to avoid pull_request_target for PR code execution"
     );
 }
 
