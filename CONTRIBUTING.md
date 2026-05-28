@@ -41,6 +41,7 @@ GitHub-hosted security scanning runs through CodeQL and repository governance wo
 - Prefer precise, self-explanatory names over abbreviations.
 - Preserve Ragloom's custom error model and attach context at the failure site.
 - Update documentation when support policy, release behavior, or configuration changes.
+- For file-backed config reload work, keep the allowlist explicit, reject unsafe runtime changes atomically, and preserve the last good applied config on reload failure.
 
 ## Testing Guidelines
 

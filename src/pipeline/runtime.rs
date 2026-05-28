@@ -418,6 +418,50 @@ impl RetryPolicy {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct LiveRetryPolicy {
+    inner: std::sync::Arc<std::sync::RwLock<RetryPolicy>>,
+}
+
+impl LiveRetryPolicy {
+    pub fn new(policy: RetryPolicy) -> Result<Self, RagloomError> {
+        policy.validate()?;
+        Ok(Self {
+            inner: std::sync::Arc::new(std::sync::RwLock::new(policy)),
+        })
+    }
+
+    pub fn current(&self) -> RetryPolicy {
+        match self.inner.read() {
+            Ok(policy) => *policy,
+            Err(poisoned) => {
+                tracing::warn!(
+                    event.name = "ragloom.retry.policy_lock_poisoned",
+                    "ragloom.retry.policy_lock_poisoned"
+                );
+                *poisoned.into_inner()
+            }
+        }
+    }
+
+    pub fn replace(&self, policy: RetryPolicy) -> Result<(), RagloomError> {
+        policy.validate()?;
+        match self.inner.write() {
+            Ok(mut guard) => {
+                *guard = policy;
+            }
+            Err(poisoned) => {
+                tracing::warn!(
+                    event.name = "ragloom.retry.policy_lock_poisoned",
+                    "ragloom.retry.policy_lock_poisoned"
+                );
+                *poisoned.into_inner() = policy;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
@@ -449,7 +493,8 @@ struct RetryItem {
 /// This is the smallest possible boundary between concurrency (queue) and
 /// processing (executor), making backpressure and shutdown behavior easy to test.
 pub async fn run_worker(mut queue: WorkQueue, executor: impl WorkExecutor) {
-    run_worker_with_retry_inner(&mut queue, executor, RetryPolicy::disabled(), None, None).await;
+    let live_policy = LiveRetryPolicy::new(RetryPolicy::disabled()).expect("disabled policy");
+    run_worker_with_retry_inner(&mut queue, executor, live_policy, None, None).await;
 }
 
 /// Runs a worker loop with a bounded in-process retry queue.
@@ -483,13 +528,24 @@ pub async fn run_worker_with_retry_and_metrics(
         );
         return;
     }
+    let live_policy = LiveRetryPolicy::new(policy).expect("validated retry policy");
+    run_worker_with_retry_inner(&mut queue, executor, live_policy, summary, metrics).await;
+}
+
+pub async fn run_worker_with_live_retry_and_metrics(
+    mut queue: WorkQueue,
+    executor: impl WorkExecutor,
+    policy: LiveRetryPolicy,
+    summary: Option<IngestionSummary>,
+    metrics: Option<IngestionMetrics>,
+) {
     run_worker_with_retry_inner(&mut queue, executor, policy, summary, metrics).await;
 }
 
 async fn run_worker_with_retry_inner(
     queue: &mut WorkQueue,
     executor: impl WorkExecutor,
-    policy: RetryPolicy,
+    policy: LiveRetryPolicy,
     summary: Option<IngestionSummary>,
     metrics: Option<IngestionMetrics>,
 ) {
@@ -522,6 +578,7 @@ async fn run_worker_with_retry_inner(
             tokio::time::sleep(item.delay).await;
         }
 
+        let policy_snapshot = policy.current();
         let record = item.record;
         let attempt = item.attempt;
         let record_type = match &record {
@@ -544,27 +601,27 @@ async fn run_worker_with_retry_inner(
             record_type,
             canonical_path = canonical_path,
             retry.attempt = attempt,
-            retry.max_attempts = policy.max_attempts,
+            retry.max_attempts = policy_snapshot.max_attempts,
         )
         .in_scope(|| executor.execute(record.clone()))
         .await
         .map_or_else(
             |err| {
                 let retryable = is_retryable_error_kind(err.kind);
-                let should_retry = policy.should_retry(&err, attempt);
-                if should_retry && retries.len() < policy.max_queued_retries {
+                let should_retry = policy_snapshot.should_retry(&err, attempt);
+                if should_retry && retries.len() < policy_snapshot.max_queued_retries {
                     let next_attempt = attempt + 1;
-                    let delay = policy.delay_before_attempt(next_attempt);
+                    let delay = policy_snapshot.delay_before_attempt(next_attempt);
                     tracing::warn!(
                         event.name = "ragloom.retry.scheduled",
                         record_type,
                         canonical_path = canonical_path,
                         retry.attempt = attempt,
                         retry.next_attempt = next_attempt,
-                        retry.max_attempts = policy.max_attempts,
+                        retry.max_attempts = policy_snapshot.max_attempts,
                         retry.backoff_ms = delay.as_millis() as u64,
                         retry.queue_len = retries.len() + 1,
-                        retry.max_queued_retries = policy.max_queued_retries,
+                        retry.max_queued_retries = policy_snapshot.max_queued_retries,
                         error.kind = %err.kind,
                         error.message = %err,
                         "ragloom.retry.scheduled"
@@ -592,7 +649,7 @@ async fn run_worker_with_retry_inner(
                         record_type,
                         canonical_path = canonical_path,
                         retry.attempt = attempt,
-                        retry.max_attempts = policy.max_attempts,
+                        retry.max_attempts = policy_snapshot.max_attempts,
                         retry.queue_len = retries.len(),
                         error.kind = %err.kind,
                         error.message = %err,
@@ -2390,6 +2447,54 @@ mod tests {
             .expect("worker should finish")
             .expect("worker join");
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn live_retry_policy_applies_to_future_failures() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let executor = ScriptedExecutor::new(vec![Err(RagloomErrorKind::Io), Ok(())]);
+        let attempts = std::sync::Arc::clone(&executor.attempts);
+        let live_policy = LiveRetryPolicy::new(RetryPolicy::disabled()).expect("live policy");
+        let live_policy_for_worker = live_policy.clone();
+
+        let worker = tokio::spawn(async move {
+            run_worker_with_live_retry_and_metrics(
+                rx,
+                executor,
+                live_policy_for_worker,
+                None,
+                None,
+            )
+            .await;
+        });
+
+        live_policy
+            .replace(RetryPolicy {
+                max_attempts: 2,
+                max_queued_retries: 1,
+                initial_backoff: std::time::Duration::ZERO,
+                max_backoff: std::time::Duration::ZERO,
+            })
+            .expect("replace retry policy");
+
+        tx.send(WalRecord::WorkItemV2 {
+            fingerprint: crate::ids::FileFingerprint {
+                canonical_path: "/x/a.txt".to_string(),
+                size_bytes: 10,
+                mtime_unix_secs: 100,
+                etag: None,
+            },
+        })
+        .await
+        .expect("send");
+        drop(tx);
+
+        worker.await.expect("worker");
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "future work should use the updated retry policy"
+        );
     }
 
     #[derive(Debug, Clone)]

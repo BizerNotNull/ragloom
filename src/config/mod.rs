@@ -5,6 +5,8 @@
 //! A typed config model makes validation explicit and enables safe hot reload
 //! by validating changes before applying them.
 
+pub mod reload;
+
 use serde::Deserialize;
 
 use crate::error::{RagloomError, RagloomErrorKind};
