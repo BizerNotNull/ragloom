@@ -313,15 +313,6 @@ fn build_run_config(
 
     let backend = raw.embed_backend.unwrap_or_else(|| "openai".to_string());
 
-    tracing::info!(
-        event.name = "ragloom.start",
-        source_kind = %source.kind(),
-        source_target = %source.log_target(),
-        embed_backend = %backend,
-        qdrant_collection = %collection,
-        "ragloom.start"
-    );
-
     let embed_backend = match backend.as_str() {
         "openai" => {
             let endpoint = raw
@@ -953,7 +944,17 @@ async fn try_main() -> Result<(), RagloomError> {
         .transpose()?;
     let mut active_cfg = cfg.clone();
     let running = start_running_system(&cfg).await?;
+    let mut runtime_exit = running.shutdown.clone();
     let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
+
+    tracing::info!(
+        event.name = "ragloom.start",
+        source_kind = %cfg.source.kind(),
+        source_target = %cfg.source.log_target(),
+        embed_backend = %embedding_backend_name(&cfg.embed_backend),
+        qdrant_collection = %cfg.collection,
+        "ragloom.start"
+    );
 
     loop {
         tokio::select! {
@@ -963,6 +964,15 @@ async fn try_main() -> Result<(), RagloomError> {
                         .with_context("failed to install Ctrl-C handler")
                 })?;
                 running.shutdown("shutdown").await;
+                return Ok(());
+            }
+            reason = runtime_exit.wait_for_exit() => {
+                tracing::warn!(
+                    event.name = "ragloom.runtime.exit",
+                    reason = ?reason,
+                    "ragloom.runtime.exit"
+                );
+                running.shutdown("pipeline_exit").await;
                 return Ok(());
             }
             _ = tokio::time::sleep(CONFIG_RELOAD_POLL_INTERVAL), if reload_source.is_some() => {
@@ -1190,6 +1200,13 @@ fn retry_policy_from_cfg(cfg: &RunConfig) -> Result<RetryPolicy, RagloomError> {
     };
     retry_policy.validate()?;
     Ok(retry_policy)
+}
+
+fn embedding_backend_name(backend: &EmbedBackend) -> &'static str {
+    match backend {
+        EmbedBackend::OpenAi { .. } => "openai",
+        EmbedBackend::Http { .. } => "http",
+    }
 }
 
 fn validate_reloadable_changes(
