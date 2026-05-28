@@ -287,6 +287,11 @@ ragloom --config ./ragloom.yaml --embed-backend http --embed-model default
 - chunker settings are currently configured by CLI flags, not by YAML
 - flags support both `--flag value` and `--flag=value`
 - the config file is merged with CLI flags; CLI flags take precedence
+- when `--config` is in use, Ragloom polls the config file for changes once per second
+- hot reload currently applies only to `retry.*`
+- CLI-provided retry flags stay pinned across reloads; file edits only affect retry fields that still come from YAML
+- changes to `source.*`, `embed.endpoint`, `sink.*`, `state.path`, and `health.addr` are rejected during reload and require a process restart
+- invalid or rejected reloads are logged and the last good runtime config remains active
 
 ### Retry behavior
 

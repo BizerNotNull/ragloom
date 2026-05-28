@@ -7,20 +7,23 @@
 
 use std::time::Duration;
 
+use ragloom::config::reload::{FileReloadSource, ReloadSource};
 use ragloom::config::{DEFAULT_STATE_PATH, PipelineConfig};
 use ragloom::embed::http_client::{HttpEmbeddingClient, HttpEmbeddingConfig};
 use ragloom::error::{RagloomError, RagloomErrorKind};
 use ragloom::observability::health::{HealthServer, HealthState};
 use ragloom::observability::metrics::IngestionMetrics;
 use ragloom::pipeline::runtime::{
-    AckingExecutor, AsyncRuntime, IngestionSummary, PipelineExecutor, RetryPolicy, Runtime,
-    RuntimeExitReason, run_worker_with_retry_and_metrics,
+    AckingExecutor, AsyncRuntime, IngestionSummary, LiveRetryPolicy, PipelineExecutor, RetryPolicy,
+    Runtime, RuntimeExitReason, run_worker_with_live_retry_and_metrics,
 };
 use ragloom::sink::qdrant::{QdrantConfig, QdrantSink};
 use ragloom::source::runtime::{RunSource, USAGE, prepare_source_runtime, resolve_run_source};
 
 #[cfg(test)]
 mod test_support;
+
+const CONFIG_RELOAD_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Runtime configuration constructed from CLI arguments.
 ///
@@ -64,6 +67,48 @@ pub enum ParsedCommand {
     Version,
 }
 
+#[derive(Debug, Clone, Default)]
+struct RawCliArgs {
+    config_path: Option<String>,
+    source_kind: Option<String>,
+    dir: Option<String>,
+    s3_bucket: Option<String>,
+    s3_prefix: Option<String>,
+    embed_backend: Option<String>,
+    embed_url: Option<String>,
+    embed_model: Option<String>,
+    openai_endpoint: Option<String>,
+    openai_api_key: Option<String>,
+    openai_model: Option<String>,
+    qdrant_url: Option<String>,
+    collection: Option<String>,
+    state_path: Option<String>,
+    health_addr: Option<String>,
+    create_collection_if_missing: bool,
+    collection_vector_size: Option<String>,
+    chunker_strategy: Option<String>,
+    size_metric: Option<String>,
+    size_max: Option<String>,
+    size_min: Option<String>,
+    size_overlap: Option<String>,
+    tokenizer: Option<String>,
+    chunker_mode: Option<String>,
+    chunker_single: Option<String>,
+    enable_semantic: bool,
+    semantic_provider: Option<String>,
+    semantic_percentile: Option<String>,
+    retry_max_attempts: Option<String>,
+    retry_max_queued: Option<String>,
+    retry_initial_backoff_ms: Option<String>,
+    retry_max_backoff_ms: Option<String>,
+}
+
+enum RawParsedCommand {
+    Run(Box<RawCliArgs>),
+    Help,
+    Version,
+}
+
 /// Embedding backend selection.
 ///
 /// # Why
@@ -88,43 +133,46 @@ pub enum EmbedBackend {
 /// Using `std::env::args` keeps the binary dependency-free while still allowing
 /// deterministic unit tests for argument handling.
 pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
-    let mut config_path: Option<String> = None;
-    let mut source_kind: Option<String> = None;
-    let mut dir: Option<String> = None;
-    let mut s3_bucket: Option<String> = None;
-    let mut s3_prefix: Option<String> = None;
-    let mut embed_backend: Option<String> = None;
+    match parse_raw_cli_args(args)? {
+        RawParsedCommand::Help => Ok(ParsedCommand::Help),
+        RawParsedCommand::Version => Ok(ParsedCommand::Version),
+        RawParsedCommand::Run(raw) => {
+            let file_config = raw
+                .config_path
+                .as_deref()
+                .map(load_pipeline_config)
+                .transpose()?;
+            Ok(ParsedCommand::Run(Box::new(build_run_config(
+                *raw,
+                file_config.as_ref(),
+            )?)))
+        }
+    }
+}
 
-    let mut embed_url: Option<String> = None;
-    let mut embed_model: Option<String> = None;
+fn parse_reload_run_config_from_contents(
+    args: &[String],
+    yaml: &str,
+    path: &std::path::Path,
+) -> Result<RunConfig, RagloomError> {
+    let raw = match parse_raw_cli_args(args)? {
+        RawParsedCommand::Run(raw) => *raw,
+        RawParsedCommand::Help | RawParsedCommand::Version => {
+            return Err(
+                RagloomError::from_kind(RagloomErrorKind::Config).with_context(format!(
+                    "config reload expected runtime command for {}",
+                    path.display()
+                )),
+            );
+        }
+    };
+    let file_config = PipelineConfig::from_yaml_str(yaml)
+        .map_err(|e| e.with_context(format!("failed to parse config file: {}", path.display())))?;
+    build_run_config(raw, Some(&file_config))
+}
 
-    let mut openai_endpoint: Option<String> = None;
-    let mut openai_api_key: Option<String> = None;
-    let mut openai_model: Option<String> = None;
-
-    let mut qdrant_url: Option<String> = None;
-    let mut collection: Option<String> = None;
-    let mut state_path: Option<String> = None;
-    let mut health_addr: Option<String> = None;
-    let mut create_collection_if_missing = false;
-    let mut collection_vector_size: Option<String> = None;
-
-    let mut chunker_strategy: Option<String> = None;
-    let mut size_metric: Option<String> = None;
-    let mut size_max: Option<String> = None;
-    let mut size_min: Option<String> = None;
-    let mut size_overlap: Option<String> = None;
-    let mut tokenizer: Option<String> = None;
-    let mut chunker_mode: Option<String> = None;
-    let mut chunker_single: Option<String> = None;
-    let mut enable_semantic = false;
-    let mut semantic_provider: Option<String> = None;
-    let mut semantic_percentile: Option<String> = None;
-    let mut retry_max_attempts: Option<String> = None;
-    let mut retry_max_queued: Option<String> = None;
-    let mut retry_initial_backoff_ms: Option<String> = None;
-    let mut retry_max_backoff_ms: Option<String> = None;
-
+fn parse_raw_cli_args(args: &[String]) -> Result<RawParsedCommand, RagloomError> {
+    let mut raw = RawCliArgs::default();
     let mut iter = args.iter().skip(1).peekable();
     while let Some(arg) = iter.next() {
         let (flag, inline_value) = match arg.split_once('=') {
@@ -133,118 +181,123 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         };
 
         match flag {
-            "--config" => config_path = next_arg_value(inline_value, &mut iter),
-            "--source-kind" => source_kind = next_arg_value(inline_value, &mut iter),
-            "--dir" => dir = next_arg_value(inline_value, &mut iter),
-            "--s3-bucket" => s3_bucket = next_arg_value(inline_value, &mut iter),
-            "--s3-prefix" => s3_prefix = next_arg_value(inline_value, &mut iter),
-
-            "--embed-backend" => embed_backend = next_arg_value(inline_value, &mut iter),
-
-            "--embed-url" => embed_url = next_arg_value(inline_value, &mut iter),
-            "--embed-model" => embed_model = next_arg_value(inline_value, &mut iter),
-
-            "--openai-endpoint" => openai_endpoint = next_arg_value(inline_value, &mut iter),
-            "--openai-api-key" => openai_api_key = next_arg_value(inline_value, &mut iter),
-            "--openai-model" => openai_model = next_arg_value(inline_value, &mut iter),
-
-            "--qdrant-url" => qdrant_url = next_arg_value(inline_value, &mut iter),
-            "--collection" => collection = next_arg_value(inline_value, &mut iter),
-            "--state-path" => state_path = next_arg_value(inline_value, &mut iter),
-            "--health-addr" => health_addr = next_arg_value(inline_value, &mut iter),
+            "--config" => raw.config_path = next_arg_value(inline_value, &mut iter),
+            "--source-kind" => raw.source_kind = next_arg_value(inline_value, &mut iter),
+            "--dir" => raw.dir = next_arg_value(inline_value, &mut iter),
+            "--s3-bucket" => raw.s3_bucket = next_arg_value(inline_value, &mut iter),
+            "--s3-prefix" => raw.s3_prefix = next_arg_value(inline_value, &mut iter),
+            "--embed-backend" => raw.embed_backend = next_arg_value(inline_value, &mut iter),
+            "--embed-url" => raw.embed_url = next_arg_value(inline_value, &mut iter),
+            "--embed-model" => raw.embed_model = next_arg_value(inline_value, &mut iter),
+            "--openai-endpoint" => raw.openai_endpoint = next_arg_value(inline_value, &mut iter),
+            "--openai-api-key" => raw.openai_api_key = next_arg_value(inline_value, &mut iter),
+            "--openai-model" => raw.openai_model = next_arg_value(inline_value, &mut iter),
+            "--qdrant-url" => raw.qdrant_url = next_arg_value(inline_value, &mut iter),
+            "--collection" => raw.collection = next_arg_value(inline_value, &mut iter),
+            "--state-path" => raw.state_path = next_arg_value(inline_value, &mut iter),
+            "--health-addr" => raw.health_addr = next_arg_value(inline_value, &mut iter),
             "--create-collection-if-missing" => {
                 validate_boolean_flag(
                     flag,
                     inline_value,
                     iter.peek().map(|next_arg| next_arg.as_str()),
                 )?;
-                create_collection_if_missing = true;
+                raw.create_collection_if_missing = true;
             }
             "--collection-vector-size" => {
-                collection_vector_size =
+                raw.collection_vector_size =
                     Some(next_arg_value(inline_value, &mut iter).ok_or_else(|| {
                         cli_invalid_input("missing required value: --collection-vector-size")
                     })?);
             }
-
-            "--chunker-strategy" => chunker_strategy = next_arg_value(inline_value, &mut iter),
-            "--size-metric" => size_metric = next_arg_value(inline_value, &mut iter),
-            "--size-max" => size_max = next_arg_value(inline_value, &mut iter),
-            "--size-min" => size_min = next_arg_value(inline_value, &mut iter),
-            "--size-overlap" => size_overlap = next_arg_value(inline_value, &mut iter),
-            "--tokenizer" => tokenizer = next_arg_value(inline_value, &mut iter),
-            "--chunker-mode" => chunker_mode = next_arg_value(inline_value, &mut iter),
-            "--chunker-single" => chunker_single = next_arg_value(inline_value, &mut iter),
+            "--chunker-strategy" => raw.chunker_strategy = next_arg_value(inline_value, &mut iter),
+            "--size-metric" => raw.size_metric = next_arg_value(inline_value, &mut iter),
+            "--size-max" => raw.size_max = next_arg_value(inline_value, &mut iter),
+            "--size-min" => raw.size_min = next_arg_value(inline_value, &mut iter),
+            "--size-overlap" => raw.size_overlap = next_arg_value(inline_value, &mut iter),
+            "--tokenizer" => raw.tokenizer = next_arg_value(inline_value, &mut iter),
+            "--chunker-mode" => raw.chunker_mode = next_arg_value(inline_value, &mut iter),
+            "--chunker-single" => raw.chunker_single = next_arg_value(inline_value, &mut iter),
             "--enable-semantic" => {
                 validate_boolean_flag(
                     flag,
                     inline_value,
                     iter.peek().map(|next_arg| next_arg.as_str()),
                 )?;
-                enable_semantic = true;
+                raw.enable_semantic = true;
             }
-            "--semantic-provider" => semantic_provider = next_arg_value(inline_value, &mut iter),
+            "--semantic-provider" => {
+                raw.semantic_provider = next_arg_value(inline_value, &mut iter)
+            }
             "--semantic-percentile" => {
-                semantic_percentile = next_arg_value(inline_value, &mut iter)
+                raw.semantic_percentile = next_arg_value(inline_value, &mut iter)
             }
-            "--retry-max-attempts" => retry_max_attempts = next_arg_value(inline_value, &mut iter),
-            "--retry-max-queued" => retry_max_queued = next_arg_value(inline_value, &mut iter),
+            "--retry-max-attempts" => {
+                raw.retry_max_attempts = next_arg_value(inline_value, &mut iter)
+            }
+            "--retry-max-queued" => raw.retry_max_queued = next_arg_value(inline_value, &mut iter),
             "--retry-initial-backoff-ms" => {
-                retry_initial_backoff_ms = next_arg_value(inline_value, &mut iter)
+                raw.retry_initial_backoff_ms = next_arg_value(inline_value, &mut iter)
             }
             "--retry-max-backoff-ms" => {
-                retry_max_backoff_ms = next_arg_value(inline_value, &mut iter)
+                raw.retry_max_backoff_ms = next_arg_value(inline_value, &mut iter)
             }
-            "--help" | "-h" => return Ok(ParsedCommand::Help),
-            "--version" | "-V" => return Ok(ParsedCommand::Version),
+            "--help" | "-h" => return Ok(RawParsedCommand::Help),
+            "--version" | "-V" => return Ok(RawParsedCommand::Version),
             unknown => return Err(cli_invalid_input(format!("unknown flag: {unknown}"))),
         }
     }
+    Ok(RawParsedCommand::Run(Box::new(raw)))
+}
 
-    let file_config = config_path
-        .as_deref()
-        .map(load_pipeline_config)
-        .transpose()?;
-
+fn build_run_config(
+    raw: RawCliArgs,
+    file_config: Option<&PipelineConfig>,
+) -> Result<RunConfig, RagloomError> {
     let source = resolve_run_source(
-        source_kind.as_deref(),
-        dir,
-        s3_bucket,
-        s3_prefix,
-        file_config.as_ref().map(|cfg| &cfg.source),
+        raw.source_kind.as_deref(),
+        raw.dir,
+        raw.s3_bucket,
+        raw.s3_prefix,
+        file_config.map(|cfg| &cfg.source),
     )?;
 
-    let qdrant_url = qdrant_url
-        .or_else(|| file_config.as_ref().map(|c| c.sink.qdrant_url.clone()))
+    let qdrant_url = raw
+        .qdrant_url
+        .or_else(|| file_config.map(|c| c.sink.qdrant_url.clone()))
         .ok_or_else(|| {
             cli_config_error("missing required value: --qdrant-url or sink.qdrant_url in --config")
         })?;
     if qdrant_url.trim().is_empty() {
         return Err(cli_config_error("--qdrant-url or sink.qdrant_url is empty"));
     }
-    let collection = collection
-        .or_else(|| file_config.as_ref().map(|c| c.sink.collection.clone()))
+    let collection = raw
+        .collection
+        .or_else(|| file_config.map(|c| c.sink.collection.clone()))
         .ok_or_else(|| {
             cli_config_error("missing required value: --collection or sink.collection in --config")
         })?;
     if collection.trim().is_empty() {
         return Err(cli_config_error("--collection or sink.collection is empty"));
     }
-    let state_path = state_path
-        .or_else(|| file_config.as_ref().map(|c| c.state.path.clone()))
+    let state_path = raw
+        .state_path
+        .or_else(|| file_config.map(|c| c.state.path.clone()))
         .unwrap_or_else(|| DEFAULT_STATE_PATH.to_string());
     if state_path.trim().is_empty() {
         return Err(cli_config_error("--state-path or state.path is empty"));
     }
-    let health_addr =
-        health_addr.or_else(|| file_config.as_ref().and_then(|c| c.health.addr.clone()));
+    let health_addr = raw
+        .health_addr
+        .or_else(|| file_config.and_then(|c| c.health.addr.clone()));
     if health_addr
         .as_deref()
         .is_some_and(|addr| addr.trim().is_empty())
     {
         return Err(cli_config_error("--health-addr or health.addr is empty"));
     }
-    let collection_vector_size = collection_vector_size
+    let collection_vector_size = raw
+        .collection_vector_size
         .map(|s| {
             s.parse::<usize>().map_err(|e| {
                 RagloomError::from_kind(RagloomErrorKind::InvalidInput)
@@ -258,7 +311,7 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         ));
     }
 
-    let backend = embed_backend.unwrap_or_else(|| "openai".to_string());
+    let backend = raw.embed_backend.unwrap_or_else(|| "openai".to_string());
 
     tracing::info!(
         event.name = "ragloom.start",
@@ -271,18 +324,21 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
 
     let embed_backend = match backend.as_str() {
         "openai" => {
-            let endpoint = openai_endpoint
-                .or_else(|| file_config.as_ref().map(|c| c.embed.endpoint.clone()))
+            let endpoint = raw
+                .openai_endpoint
+                .or_else(|| file_config.map(|c| c.embed.endpoint.clone()))
                 .unwrap_or_else(|| "https://api.openai.com/v1/embeddings".to_string());
             if endpoint.trim().is_empty() {
                 return Err(cli_config_error(
                     "--openai-endpoint or embed.endpoint is empty",
                 ));
             }
-            let api_key = openai_api_key.ok_or_else(|| {
+            let api_key = raw.openai_api_key.ok_or_else(|| {
                 cli_config_error("missing required flag for openai backend: --openai-api-key")
             })?;
-            let model = openai_model.unwrap_or_else(|| "text-embedding-3-small".to_string());
+            let model = raw
+                .openai_model
+                .unwrap_or_else(|| "text-embedding-3-small".to_string());
             EmbedBackend::OpenAi {
                 endpoint,
                 api_key,
@@ -290,8 +346,9 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
             }
         }
         "http" => {
-            let url = embed_url
-                .or_else(|| file_config.as_ref().map(|c| c.embed.endpoint.clone()))
+            let url = raw
+                .embed_url
+                .or_else(|| file_config.map(|c| c.embed.endpoint.clone()))
                 .ok_or_else(|| {
                     cli_config_error(
                         "missing required value for http backend: --embed-url or embed.endpoint in --config",
@@ -300,7 +357,7 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
             if url.trim().is_empty() {
                 return Err(cli_config_error("--embed-url or embed.endpoint is empty"));
             }
-            let model = embed_model.unwrap_or_else(|| "default".to_string());
+            let model = raw.embed_model.unwrap_or_else(|| "default".to_string());
             EmbedBackend::Http { url, model }
         }
         other => {
@@ -310,7 +367,9 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         }
     };
 
-    let chunker_strategy = chunker_strategy.unwrap_or_else(|| "recursive".to_string());
+    let chunker_strategy = raw
+        .chunker_strategy
+        .unwrap_or_else(|| "recursive".to_string());
     match chunker_strategy.as_str() {
         "recursive" | "legacy" => {}
         other => {
@@ -320,7 +379,7 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         }
     }
 
-    let size_metric = size_metric.unwrap_or_else(|| "chars".to_string());
+    let size_metric = raw.size_metric.unwrap_or_else(|| "chars".to_string());
     match size_metric.as_str() {
         "chars" | "tokens" => {}
         other => {
@@ -330,7 +389,8 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         }
     }
 
-    let size_max = size_max
+    let size_max = raw
+        .size_max
         .map(|s| {
             s.parse::<usize>().map_err(|e| {
                 RagloomError::from_kind(RagloomErrorKind::InvalidInput)
@@ -340,7 +400,8 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         .transpose()?
         .unwrap_or(if size_metric == "tokens" { 512 } else { 2000 });
 
-    let size_min = size_min
+    let size_min = raw
+        .size_min
         .map(|s| {
             s.parse::<usize>().map_err(|e| {
                 RagloomError::from_kind(RagloomErrorKind::InvalidInput)
@@ -350,7 +411,8 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         .transpose()?
         .unwrap_or(0);
 
-    let size_overlap = size_overlap
+    let size_overlap = raw
+        .size_overlap
         .map(|s| {
             s.parse::<usize>().map_err(|e| {
                 RagloomError::from_kind(RagloomErrorKind::InvalidInput)
@@ -360,7 +422,9 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         .transpose()?
         .unwrap_or(0);
 
-    let tokenizer = tokenizer.unwrap_or_else(|| "tiktoken-cl100k".to_string());
+    let tokenizer = raw
+        .tokenizer
+        .unwrap_or_else(|| "tiktoken-cl100k".to_string());
     match tokenizer.as_str() {
         "tiktoken-cl100k" => {}
         other => {
@@ -370,7 +434,7 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         }
     }
 
-    let chunker_mode = chunker_mode.unwrap_or_else(|| "router".to_string());
+    let chunker_mode = raw.chunker_mode.unwrap_or_else(|| "router".to_string());
     match chunker_mode.as_str() {
         "router" | "single" => {}
         other => {
@@ -379,13 +443,15 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
             )));
         }
     }
-    if chunker_mode == "single" && chunker_single.is_none() {
+    if chunker_mode == "single" && raw.chunker_single.is_none() {
         return Err(cli_config_error(
             "--chunker-mode=single requires --chunker-single",
         ));
     }
 
-    if enable_semantic && chunker_mode == "single" && chunker_single.as_deref() != Some("semantic")
+    if raw.enable_semantic
+        && chunker_mode == "single"
+        && raw.chunker_single.as_deref() != Some("semantic")
     {
         return Err(
             RagloomError::from_kind(RagloomErrorKind::InvalidInput).with_context(
@@ -395,7 +461,9 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         );
     }
 
-    let semantic_provider = semantic_provider.unwrap_or_else(|| "adapter".to_string());
+    let semantic_provider = raw
+        .semantic_provider
+        .unwrap_or_else(|| "adapter".to_string());
     match semantic_provider.as_str() {
         "adapter" => {}
         "fastembed" => {
@@ -417,7 +485,8 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         }
     }
 
-    let semantic_percentile = semantic_percentile
+    let semantic_percentile = raw
+        .semantic_percentile
         .map(|s| {
             s.parse::<u8>().map_err(|e| {
                 RagloomError::from_kind(RagloomErrorKind::InvalidInput)
@@ -434,7 +503,8 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         );
     }
 
-    let retry_max_attempts = retry_max_attempts
+    let retry_max_attempts = raw
+        .retry_max_attempts
         .map(|s| {
             s.parse::<u32>().map_err(|e| {
                 RagloomError::from_kind(RagloomErrorKind::InvalidInput)
@@ -442,10 +512,11 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
             })
         })
         .transpose()?
-        .or_else(|| file_config.as_ref().map(|c| c.retry.max_attempts))
+        .or_else(|| file_config.map(|c| c.retry.max_attempts))
         .unwrap_or(3);
 
-    let retry_max_queued = retry_max_queued
+    let retry_max_queued = raw
+        .retry_max_queued
         .map(|s| {
             s.parse::<usize>().map_err(|e| {
                 RagloomError::from_kind(RagloomErrorKind::InvalidInput)
@@ -453,10 +524,11 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
             })
         })
         .transpose()?
-        .or_else(|| file_config.as_ref().map(|c| c.retry.max_queued))
+        .or_else(|| file_config.map(|c| c.retry.max_queued))
         .unwrap_or(128);
 
-    let retry_initial_backoff_ms = retry_initial_backoff_ms
+    let retry_initial_backoff_ms = raw
+        .retry_initial_backoff_ms
         .map(|s| {
             s.parse::<u64>().map_err(|e| {
                 RagloomError::from_kind(RagloomErrorKind::InvalidInput)
@@ -464,10 +536,11 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
             })
         })
         .transpose()?
-        .or_else(|| file_config.as_ref().map(|c| c.retry.initial_backoff_ms))
+        .or_else(|| file_config.map(|c| c.retry.initial_backoff_ms))
         .unwrap_or(100);
 
-    let retry_max_backoff_ms = retry_max_backoff_ms
+    let retry_max_backoff_ms = raw
+        .retry_max_backoff_ms
         .map(|s| {
             s.parse::<u64>().map_err(|e| {
                 RagloomError::from_kind(RagloomErrorKind::InvalidInput)
@@ -475,7 +548,7 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
             })
         })
         .transpose()?
-        .or_else(|| file_config.as_ref().map(|c| c.retry.max_backoff_ms))
+        .or_else(|| file_config.map(|c| c.retry.max_backoff_ms))
         .unwrap_or(2_000);
 
     let retry_policy = RetryPolicy {
@@ -486,14 +559,14 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
     };
     retry_policy.validate()?;
 
-    Ok(ParsedCommand::Run(Box::new(RunConfig {
+    Ok(RunConfig {
         source,
         embed_backend,
         qdrant_url,
         collection,
         state_path,
         health_addr,
-        create_collection_if_missing,
+        create_collection_if_missing: raw.create_collection_if_missing,
         collection_vector_size,
         chunker_strategy,
         size_metric,
@@ -502,15 +575,15 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         size_overlap,
         tokenizer,
         chunker_mode,
-        chunker_single,
-        enable_semantic,
+        chunker_single: raw.chunker_single,
+        enable_semantic: raw.enable_semantic,
         semantic_provider,
         semantic_percentile,
         retry_max_attempts,
         retry_max_queued,
         retry_initial_backoff_ms,
         retry_max_backoff_ms,
-    })))
+    })
 }
 
 fn load_pipeline_config(path: &str) -> Result<PipelineConfig, RagloomError> {
@@ -636,6 +709,30 @@ struct PreparedStartup {
     embedding: std::sync::Arc<dyn ragloom::embed::EmbeddingProvider + Send + Sync>,
     sink: QdrantSink,
     chunker: std::sync::Arc<dyn ragloom::transform::chunker::Chunker>,
+}
+
+struct RunningSystem {
+    health_state: HealthState,
+    health_server: Option<HealthServer>,
+    shutdown: ragloom::pipeline::runtime::ShutdownHandle,
+    worker: tokio::task::JoinHandle<()>,
+    health_monitor: tokio::task::JoinHandle<()>,
+    summary: IngestionSummary,
+    retry_policy: LiveRetryPolicy,
+}
+
+impl RunningSystem {
+    async fn shutdown(self, trigger: &'static str) {
+        self.health_state.mark_shutting_down();
+        self.shutdown.shutdown();
+        if let Some(server) = self.health_server {
+            server.shutdown().await;
+        }
+        let _ = self.worker.await;
+        self.health_monitor.abort();
+        let _ = self.health_monitor.await;
+        self.summary.emit_if_dirty(trigger);
+    }
 }
 
 async fn prepare_startup(cfg: &RunConfig) -> Result<PreparedStartup, RagloomError> {
@@ -851,7 +948,97 @@ async fn try_main() -> Result<(), RagloomError> {
         }
         ParsedCommand::Run(cfg) => *cfg,
     };
+    let mut reload_source = extract_config_path(&args)
+        .map(FileReloadSource::new)
+        .transpose()?;
+    let mut active_cfg = cfg.clone();
+    let running = start_running_system(&cfg).await?;
+    let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
 
+    loop {
+        tokio::select! {
+            result = &mut ctrl_c => {
+                result.map_err(|e| {
+                    RagloomError::new(RagloomErrorKind::Internal, e)
+                        .with_context("failed to install Ctrl-C handler")
+                })?;
+                running.shutdown("shutdown").await;
+                return Ok(());
+            }
+            _ = tokio::time::sleep(CONFIG_RELOAD_POLL_INTERVAL), if reload_source.is_some() => {
+                let Some(source) = reload_source.as_mut() else {
+                    continue;
+                };
+                match source.poll_changed_contents() {
+                    Ok(Some(contents)) => {
+                        match parse_reload_run_config_from_contents(&args, &contents, &source.config_path()) {
+                            Ok(next_cfg) => {
+                                match validate_reloadable_changes(&active_cfg, &next_cfg) {
+                                    Ok(false) => {
+                                        tracing::info!(
+                                            event.name = "ragloom.config.reload.noop",
+                                            path = %source.config_path().display(),
+                                            "ragloom.config.reload.noop"
+                                        );
+                                    }
+                                    Ok(true) => {
+                                        let next_policy = retry_policy_from_cfg(&next_cfg)?;
+                                        tracing::info!(
+                                            event.name = "ragloom.config.reload.applying",
+                                            path = %source.config_path().display(),
+                                            "ragloom.config.reload.applying"
+                                        );
+                                        running.retry_policy.replace(next_policy)?;
+                                        active_cfg = next_cfg;
+                                        tracing::info!(
+                                            event.name = "ragloom.config.reload.applied",
+                                            path = %source.config_path().display(),
+                                            retry_max_attempts = active_cfg.retry_max_attempts,
+                                            retry_max_queued = active_cfg.retry_max_queued,
+                                            retry_initial_backoff_ms = active_cfg.retry_initial_backoff_ms,
+                                            retry_max_backoff_ms = active_cfg.retry_max_backoff_ms,
+                                            "ragloom.config.reload.applied"
+                                        );
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            event.name = "ragloom.config.reload.rejected",
+                                            path = %source.config_path().display(),
+                                            error.kind = %err.kind,
+                                            error.message = %err,
+                                            "ragloom.config.reload.rejected"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    event.name = "ragloom.config.reload.rejected",
+                                    path = %source.config_path().display(),
+                                    error.kind = %err.kind,
+                                    error.message = %err,
+                                    "ragloom.config.reload.rejected"
+                                );
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            event.name = "ragloom.config.reload.poll_failed",
+                            path = %source.config_path().display(),
+                            error.kind = %err.kind,
+                            error.message = %err,
+                            "ragloom.config.reload.poll_failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn start_running_system(cfg: &RunConfig) -> Result<RunningSystem, RagloomError> {
     let health_state = HealthState::starting();
     let metrics = IngestionMetrics::default();
     let health_server = match cfg.health_addr.as_deref() {
@@ -898,7 +1085,7 @@ async fn try_main() -> Result<(), RagloomError> {
         embedding,
         sink,
         chunker,
-    } = match prepare_startup(&cfg).await {
+    } = match prepare_startup(cfg).await {
         Ok(startup) => startup,
         Err(err) => {
             health_state.mark_startup_failed();
@@ -937,14 +1124,16 @@ async fn try_main() -> Result<(), RagloomError> {
         initial_backoff: Duration::from_millis(cfg.retry_initial_backoff_ms),
         max_backoff: Duration::from_millis(cfg.retry_max_backoff_ms),
     };
+    let live_retry_policy = LiveRetryPolicy::new(retry_policy)?;
     let summary_for_worker = summary.clone();
     let metrics_for_worker = metrics.clone();
+    let live_retry_policy_for_worker = live_retry_policy.clone();
 
     let worker = tokio::spawn(async move {
-        run_worker_with_retry_and_metrics(
+        run_worker_with_live_retry_and_metrics(
             queue,
             executor,
-            retry_policy,
+            live_retry_policy_for_worker,
             Some(summary_for_worker),
             Some(metrics_for_worker),
         )
@@ -959,22 +1148,15 @@ async fn try_main() -> Result<(), RagloomError> {
         }
     });
 
-    tokio::signal::ctrl_c().await.map_err(|e| {
-        RagloomError::new(RagloomErrorKind::Internal, e)
-            .with_context("failed to install Ctrl-C handler")
-    })?;
-
-    health_state.mark_shutting_down();
-    shutdown.shutdown();
-    if let Some(server) = health_server {
-        server.shutdown().await;
-    }
-    let _ = worker.await;
-    health_monitor.abort();
-    let _ = health_monitor.await;
-    summary.emit_if_dirty("shutdown");
-
-    Ok(())
+    Ok(RunningSystem {
+        health_state,
+        health_server,
+        shutdown,
+        worker,
+        health_monitor,
+        summary,
+        retry_policy: live_retry_policy,
+    })
 }
 
 fn mark_health_from_runtime_exit(health: &HealthState, reason: RuntimeExitReason) {
@@ -982,6 +1164,114 @@ fn mark_health_from_runtime_exit(health: &HealthState, reason: RuntimeExitReason
         RuntimeExitReason::StartupFailed => health.mark_startup_failed(),
         RuntimeExitReason::RuntimeFailed => health.mark_runtime_failed(),
     }
+}
+
+fn extract_config_path(args: &[String]) -> Option<String> {
+    let mut config_path = None;
+    let mut iter = args.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        let (flag, inline_value) = match arg.split_once('=') {
+            Some((k, v)) => (k, Some(v)),
+            None => (arg.as_str(), None),
+        };
+        if flag == "--config" {
+            config_path = next_arg_value(inline_value, &mut iter);
+        }
+    }
+    config_path
+}
+
+fn retry_policy_from_cfg(cfg: &RunConfig) -> Result<RetryPolicy, RagloomError> {
+    let retry_policy = RetryPolicy {
+        max_attempts: cfg.retry_max_attempts,
+        max_queued_retries: cfg.retry_max_queued,
+        initial_backoff: Duration::from_millis(cfg.retry_initial_backoff_ms),
+        max_backoff: Duration::from_millis(cfg.retry_max_backoff_ms),
+    };
+    retry_policy.validate()?;
+    Ok(retry_policy)
+}
+
+fn validate_reloadable_changes(
+    current: &RunConfig,
+    next: &RunConfig,
+) -> Result<bool, RagloomError> {
+    if current == next {
+        return Ok(false);
+    }
+
+    let mut rejected = Vec::new();
+    if current.source != next.source {
+        rejected.push("source");
+    }
+    if current.embed_backend != next.embed_backend {
+        rejected.push("embed");
+    }
+    if current.qdrant_url != next.qdrant_url {
+        rejected.push("sink.qdrant_url");
+    }
+    if current.collection != next.collection {
+        rejected.push("sink.collection");
+    }
+    if current.state_path != next.state_path {
+        rejected.push("state.path");
+    }
+    if current.health_addr != next.health_addr {
+        rejected.push("health.addr");
+    }
+    if current.create_collection_if_missing != next.create_collection_if_missing {
+        rejected.push("create_collection_if_missing");
+    }
+    if current.collection_vector_size != next.collection_vector_size {
+        rejected.push("collection_vector_size");
+    }
+    if current.chunker_strategy != next.chunker_strategy {
+        rejected.push("chunker_strategy");
+    }
+    if current.size_metric != next.size_metric {
+        rejected.push("size_metric");
+    }
+    if current.size_max != next.size_max {
+        rejected.push("size_max");
+    }
+    if current.size_min != next.size_min {
+        rejected.push("size_min");
+    }
+    if current.size_overlap != next.size_overlap {
+        rejected.push("size_overlap");
+    }
+    if current.tokenizer != next.tokenizer {
+        rejected.push("tokenizer");
+    }
+    if current.chunker_mode != next.chunker_mode {
+        rejected.push("chunker_mode");
+    }
+    if current.chunker_single != next.chunker_single {
+        rejected.push("chunker_single");
+    }
+    if current.enable_semantic != next.enable_semantic {
+        rejected.push("enable_semantic");
+    }
+    if current.semantic_provider != next.semantic_provider {
+        rejected.push("semantic_provider");
+    }
+    if current.semantic_percentile != next.semantic_percentile {
+        rejected.push("semantic_percentile");
+    }
+
+    if !rejected.is_empty() {
+        return Err(
+            RagloomError::from_kind(RagloomErrorKind::Config).with_context(format!(
+                "config reload rejected: changed non-reloadable fields: {}",
+                rejected.join(", ")
+            )),
+        );
+    }
+
+    Ok(current.retry_max_attempts != next.retry_max_attempts
+        || current.retry_max_queued != next.retry_max_queued
+        || current.retry_initial_backoff_ms != next.retry_initial_backoff_ms
+        || current.retry_max_backoff_ms != next.retry_max_backoff_ms)
 }
 
 #[cfg(test)]
@@ -998,6 +1288,37 @@ mod tests {
     fn filesystem_source(root: &str) -> RunSource {
         RunSource::Filesystem {
             root: root.to_string(),
+        }
+    }
+
+    fn sample_run_config() -> RunConfig {
+        RunConfig {
+            source: filesystem_source("/tmp/docs"),
+            embed_backend: EmbedBackend::Http {
+                url: "http://embed".to_string(),
+                model: "default".to_string(),
+            },
+            qdrant_url: "http://qdrant".to_string(),
+            collection: "docs".to_string(),
+            state_path: ".ragloom/wal.ndjson".to_string(),
+            health_addr: None,
+            create_collection_if_missing: false,
+            collection_vector_size: Some(3),
+            chunker_strategy: "recursive".to_string(),
+            size_metric: "chars".to_string(),
+            size_max: 2000,
+            size_min: 0,
+            size_overlap: 0,
+            tokenizer: "tiktoken-cl100k".to_string(),
+            chunker_mode: "router".to_string(),
+            chunker_single: None,
+            enable_semantic: false,
+            semantic_provider: "adapter".to_string(),
+            semantic_percentile: 95,
+            retry_max_attempts: 3,
+            retry_max_queued: 128,
+            retry_initial_backoff_ms: 100,
+            retry_max_backoff_ms: 2_000,
         }
     }
 
@@ -1055,6 +1376,116 @@ mod tests {
         let err = parse_args(&args).expect_err("expected error");
         assert_eq!(err.kind, RagloomErrorKind::Config);
         assert!(err.to_string().contains("missing required value"));
+    }
+
+    #[test]
+    fn extract_config_path_supports_inline_and_separate_forms() {
+        let separate = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            "./ragloom.yaml".to_string(),
+        ];
+        let inline = vec!["ragloom".to_string(), "--config=./ragloom.yaml".to_string()];
+
+        assert_eq!(
+            extract_config_path(&separate).as_deref(),
+            Some("./ragloom.yaml")
+        );
+        assert_eq!(
+            extract_config_path(&inline).as_deref(),
+            Some("./ragloom.yaml")
+        );
+    }
+
+    #[test]
+    fn extract_config_path_uses_last_config_flag() {
+        let args = vec![
+            "ragloom".to_string(),
+            "--config=./first.yaml".to_string(),
+            "--config".to_string(),
+            "./second.yaml".to_string(),
+        ];
+
+        assert_eq!(extract_config_path(&args).as_deref(), Some("./second.yaml"));
+    }
+
+    #[test]
+    fn validate_reloadable_changes_accepts_retry_only_change() {
+        let current = sample_run_config();
+        let mut next = sample_run_config();
+        next.retry_max_attempts = 5;
+        next.retry_max_queued = 32;
+
+        assert!(validate_reloadable_changes(&current, &next).expect("reloadable"));
+    }
+
+    #[test]
+    fn validate_reloadable_changes_returns_false_for_noop_reload() {
+        let current = sample_run_config();
+        let next = sample_run_config();
+
+        assert!(!validate_reloadable_changes(&current, &next).expect("noop"));
+    }
+
+    #[test]
+    fn validate_reloadable_changes_rejects_source_change() {
+        let current = sample_run_config();
+        let mut next = sample_run_config();
+        next.source = filesystem_source("/tmp/other");
+
+        let err = validate_reloadable_changes(&current, &next).expect_err("should reject");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(err.to_string().contains("source"));
+    }
+
+    #[test]
+    fn validate_reloadable_changes_rejects_health_addr_change() {
+        let current = sample_run_config();
+        let mut next = sample_run_config();
+        next.health_addr = Some("127.0.0.1:8080".to_string());
+
+        let err = validate_reloadable_changes(&current, &next).expect_err("should reject");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(err.to_string().contains("health.addr"));
+    }
+
+    #[test]
+    fn parse_reload_run_config_from_contents_keeps_cli_pinned_retry_fields() {
+        let args = vec![
+            "ragloom".to_string(),
+            "--config".to_string(),
+            "./ragloom.yaml".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--retry-max-attempts".to_string(),
+            "9".to_string(),
+        ];
+        let yaml = r#"
+source:
+  root: "/tmp/from-config"
+embed:
+  endpoint: "http://embed-from-config"
+sink:
+  qdrant_url: "http://qdrant-from-config"
+  collection: "from-config"
+retry:
+  max_attempts: 2
+  max_queued: 32
+  initial_backoff_ms: 10
+  max_backoff_ms: 40
+"#;
+
+        let cfg = parse_reload_run_config_from_contents(
+            &args,
+            yaml,
+            std::path::Path::new("./ragloom.yaml"),
+        )
+        .expect("reload config");
+
+        assert_eq!(cfg.retry_max_attempts, 9);
+        assert_eq!(cfg.retry_max_queued, 32);
+        assert_eq!(cfg.retry_initial_backoff_ms, 10);
+        assert_eq!(cfg.retry_max_backoff_ms, 40);
     }
 
     #[test]
