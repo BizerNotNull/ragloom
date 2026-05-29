@@ -7,7 +7,7 @@ use crate::error::{RagloomError, RagloomErrorKind};
 use crate::s3::{RustS3Client, S3Client};
 use crate::source::{DirectoryScannerSource, S3PollingSource, Source};
 
-pub const USAGE: &str = "usage: ragloom [--config <path>] [--source-kind <filesystem|s3>] [--dir <path>] [--s3-bucket <name>] [--s3-prefix <prefix>] --qdrant-url <url> --collection <name> [--state-path <path>] [--health-addr <host:port>] [--retry-max-attempts <n>] [--embed-backend <openai|http>]";
+pub const USAGE: &str = "usage: ragloom [check|dry-run] [--config <path>] [--source-kind <filesystem|s3>] [--dir <path>] [--s3-bucket <name>] [--s3-prefix <prefix>] --qdrant-url <url> --collection <name> [--state-path <path>] [--health-addr <host:port>] [--retry-max-attempts <n>] [--embed-backend <openai|http>] (omit command to run ingestion)";
 
 /// Source selection constructed from CLI arguments and config.
 ///

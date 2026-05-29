@@ -96,6 +96,28 @@ cargo run --release -- \
   --openai-api-key "$OPENAI_API_KEY"
 ```
 
+To validate startup wiring without ingesting, use one of the non-ingesting command paths first:
+
+```bash
+cargo run --release -- check \
+  --dir ./docs \
+  --qdrant-url http://localhost:6333 \
+  --collection docs \
+  --create-collection-if-missing \
+  --openai-api-key "$OPENAI_API_KEY"
+```
+
+```bash
+cargo run --release -- dry-run \
+  --dir ./docs \
+  --qdrant-url http://localhost:6333 \
+  --collection docs \
+  --create-collection-if-missing \
+  --openai-api-key "$OPENAI_API_KEY"
+```
+
+`check` validates configuration, source wiring, chunker selection, and bootstrap prerequisites without starting ingest. `dry-run` performs the same validation and prints the effective startup choices, including source kind, chunker selection, and whether Ragloom would bootstrap the configured collection. Neither command sends embeddings or writes to Qdrant.
+
 With the default OpenAI model, `text-embedding-3-small`, Ragloom can infer the Qdrant vector size automatically during bootstrap.
 
 Pass `--collection-vector-size <n>` when Ragloom cannot infer the size for your embedding backend or model:
@@ -285,6 +307,7 @@ ragloom --config ./ragloom.yaml --embed-backend http --embed-model default
 - S3 runtime auth and region come from the process environment; set `AWS_REGION` or `AWS_DEFAULT_REGION` plus your normal AWS credential chain inputs
 - backend-specific auth still comes from CLI flags, such as `--openai-api-key`
 - chunker settings are currently configured by CLI flags, not by YAML
+- `check` and `dry-run` are non-ingesting command paths; `dry-run` reports effective startup choices and bootstrap prerequisites only
 - flags support both `--flag value` and `--flag=value`
 - the config file is merged with CLI flags; CLI flags take precedence
 - when `--config` is in use, Ragloom polls the config file for changes once per second

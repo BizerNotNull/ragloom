@@ -63,6 +63,8 @@ pub enum ParsedCommand {
     // Box the run config to keep this enum small enough for clippy's
     // `large_enum_variant` lint while still modeling early-exit commands cleanly.
     Run(Box<RunConfig>),
+    Check(Box<RunConfig>),
+    DryRun(Box<RunConfig>),
     Help,
     Version,
 }
@@ -105,6 +107,8 @@ struct RawCliArgs {
 
 enum RawParsedCommand {
     Run(Box<RawCliArgs>),
+    Check(Box<RawCliArgs>),
+    DryRun(Box<RawCliArgs>),
     Help,
     Version,
 }
@@ -136,6 +140,28 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
     match parse_raw_cli_args(args)? {
         RawParsedCommand::Help => Ok(ParsedCommand::Help),
         RawParsedCommand::Version => Ok(ParsedCommand::Version),
+        RawParsedCommand::Check(raw) => {
+            let file_config = raw
+                .config_path
+                .as_deref()
+                .map(load_pipeline_config)
+                .transpose()?;
+            Ok(ParsedCommand::Check(Box::new(build_run_config(
+                *raw,
+                file_config.as_ref(),
+            )?)))
+        }
+        RawParsedCommand::DryRun(raw) => {
+            let file_config = raw
+                .config_path
+                .as_deref()
+                .map(load_pipeline_config)
+                .transpose()?;
+            Ok(ParsedCommand::DryRun(Box::new(build_run_config(
+                *raw,
+                file_config.as_ref(),
+            )?)))
+        }
         RawParsedCommand::Run(raw) => {
             let file_config = raw
                 .config_path
@@ -156,7 +182,9 @@ fn parse_reload_run_config_from_contents(
     path: &std::path::Path,
 ) -> Result<RunConfig, RagloomError> {
     let raw = match parse_raw_cli_args(args)? {
-        RawParsedCommand::Run(raw) => *raw,
+        RawParsedCommand::Run(raw)
+        | RawParsedCommand::Check(raw)
+        | RawParsedCommand::DryRun(raw) => *raw,
         RawParsedCommand::Help | RawParsedCommand::Version => {
             return Err(
                 RagloomError::from_kind(RagloomErrorKind::Config).with_context(format!(
@@ -174,6 +202,21 @@ fn parse_reload_run_config_from_contents(
 fn parse_raw_cli_args(args: &[String]) -> Result<RawParsedCommand, RagloomError> {
     let mut raw = RawCliArgs::default();
     let mut iter = args.iter().skip(1).peekable();
+    let mut command = "run";
+    if let Some(arg) = iter.peek()
+        && !arg.starts_with('-')
+    {
+        command = match arg.as_str() {
+            "check" => "check",
+            "dry-run" => "dry-run",
+            other => {
+                return Err(cli_invalid_input(format!(
+                    "unknown command: {other} (expected: check|dry-run, or omit command to run ingestion)"
+                )));
+            }
+        };
+        iter.next();
+    }
     while let Some(arg) = iter.next() {
         let (flag, inline_value) = match arg.split_once('=') {
             Some((k, v)) => (k, Some(v)),
@@ -247,7 +290,12 @@ fn parse_raw_cli_args(args: &[String]) -> Result<RawParsedCommand, RagloomError>
             unknown => return Err(cli_invalid_input(format!("unknown flag: {unknown}"))),
         }
     }
-    Ok(RawParsedCommand::Run(Box::new(raw)))
+    Ok(match command {
+        "run" => RawParsedCommand::Run(Box::new(raw)),
+        "check" => RawParsedCommand::Check(Box::new(raw)),
+        "dry-run" => RawParsedCommand::DryRun(Box::new(raw)),
+        _ => unreachable!("validated command"),
+    })
 }
 
 fn build_run_config(
@@ -696,6 +744,71 @@ async fn bootstrap_collection_if_needed(
         })
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum BootstrapPlan {
+    Disabled,
+    WouldEnsureCollection { vector_size: usize },
+}
+
+impl BootstrapPlan {
+    fn render(&self) -> String {
+        match self {
+            Self::Disabled => "disabled".to_string(),
+            Self::WouldEnsureCollection { vector_size } => {
+                format!("would ensure collection exists (vector_size={vector_size})")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct StartupValidationSummary {
+    source_kind: String,
+    source_target: String,
+    embed_backend: String,
+    chunker_selection: String,
+    bootstrap: BootstrapPlan,
+}
+
+impl StartupValidationSummary {
+    fn render(&self) -> String {
+        [
+            "ragloom dry-run",
+            &format!("source_kind={}", self.source_kind),
+            &format!("source_target={}", self.source_target),
+            &format!("embed_backend={}", self.embed_backend),
+            &format!("chunker={}", self.chunker_selection),
+            &format!("bootstrap={}", self.bootstrap.render()),
+        ]
+        .join("\n")
+    }
+}
+
+fn chunker_selection(cfg: &RunConfig) -> String {
+    match cfg.chunker_mode.as_str() {
+        "router" if cfg.enable_semantic => {
+            format!("router+semantic(provider={})", cfg.semantic_provider)
+        }
+        "router" => "router".to_string(),
+        "single" => format!(
+            "single:{}",
+            cfg.chunker_single.as_deref().unwrap_or("<missing>")
+        ),
+        _ => unreachable!("validated in parse_args"),
+    }
+}
+
+fn bootstrap_plan(cfg: &RunConfig) -> Result<BootstrapPlan, RagloomError> {
+    if !cfg.create_collection_if_missing {
+        return Ok(BootstrapPlan::Disabled);
+    }
+
+    let vector_size = resolve_collection_vector_size(cfg).map_err(|e| {
+        RagloomError::new(e.kind, e).with_context("failed to bootstrap Qdrant collection")
+    })?;
+    Ok(BootstrapPlan::WouldEnsureCollection { vector_size })
+}
+
 struct PreparedStartup {
     embedding: std::sync::Arc<dyn ragloom::embed::EmbeddingProvider + Send + Sync>,
     sink: QdrantSink,
@@ -726,7 +839,10 @@ impl RunningSystem {
     }
 }
 
-async fn prepare_startup(cfg: &RunConfig) -> Result<PreparedStartup, RagloomError> {
+async fn prepare_startup(
+    cfg: &RunConfig,
+    perform_bootstrap_writes: bool,
+) -> Result<PreparedStartup, RagloomError> {
     let embed_fingerprint = embedding_fingerprint(cfg);
 
     let embedding: std::sync::Arc<dyn ragloom::embed::EmbeddingProvider + Send + Sync> =
@@ -891,12 +1007,29 @@ async fn prepare_startup(cfg: &RunConfig) -> Result<PreparedStartup, RagloomErro
         }
     };
 
-    bootstrap_collection_if_needed(cfg, &sink).await?;
+    if perform_bootstrap_writes {
+        bootstrap_collection_if_needed(cfg, &sink).await?;
+    } else {
+        let _ = bootstrap_plan(cfg)?;
+    }
 
     Ok(PreparedStartup {
         embedding,
         sink,
         chunker,
+    })
+}
+
+async fn validate_startup(cfg: &RunConfig) -> Result<StartupValidationSummary, RagloomError> {
+    let _ = prepare_startup(cfg, false).await?;
+    let _ = prepare_source_runtime(&cfg.source, std::collections::HashSet::new())?;
+
+    Ok(StartupValidationSummary {
+        source_kind: cfg.source.kind().to_string(),
+        source_target: cfg.source.log_target(),
+        embed_backend: embedding_backend_name(&cfg.embed_backend).to_string(),
+        chunker_selection: chunker_selection(cfg),
+        bootstrap: bootstrap_plan(cfg)?,
     })
 }
 
@@ -935,6 +1068,16 @@ async fn try_main() -> Result<(), RagloomError> {
         }
         ParsedCommand::Version => {
             println!("ragloom {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        ParsedCommand::Check(cfg) => {
+            let _ = validate_startup(&cfg).await?;
+            println!("ragloom check ok");
+            return Ok(());
+        }
+        ParsedCommand::DryRun(cfg) => {
+            let summary = validate_startup(&cfg).await?;
+            println!("{}", summary.render());
             return Ok(());
         }
         ParsedCommand::Run(cfg) => *cfg,
@@ -1095,7 +1238,7 @@ async fn start_running_system(cfg: &RunConfig) -> Result<RunningSystem, RagloomE
         embedding,
         sink,
         chunker,
-    } = match prepare_startup(cfg).await {
+    } = match prepare_startup(cfg, true).await {
         Ok(startup) => startup,
         Err(err) => {
             health_state.mark_startup_failed();
@@ -1979,6 +2122,78 @@ sink:
     }
 
     #[test]
+    fn parse_args_returns_check_command_for_subcommand() {
+        let args = vec![
+            "ragloom".to_string(),
+            "check".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--embed-url".to_string(),
+            "http://embed".to_string(),
+            "--qdrant-url".to_string(),
+            "http://qdrant".to_string(),
+            "--collection".to_string(),
+            "docs".to_string(),
+        ];
+
+        let cmd = parse_args(&args).expect("check command");
+        assert!(matches!(cmd, ParsedCommand::Check(_)));
+    }
+
+    #[test]
+    fn parse_args_returns_dry_run_command_for_subcommand() {
+        let args = vec![
+            "ragloom".to_string(),
+            "dry-run".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--embed-url".to_string(),
+            "http://embed".to_string(),
+            "--qdrant-url".to_string(),
+            "http://qdrant".to_string(),
+            "--collection".to_string(),
+            "docs".to_string(),
+        ];
+
+        let cmd = parse_args(&args).expect("dry-run command");
+        assert!(matches!(cmd, ParsedCommand::DryRun(_)));
+    }
+
+    #[test]
+    fn parse_args_unknown_command_mentions_implicit_run() {
+        let args = vec!["ragloom".to_string(), "run".to_string()];
+
+        let err = parse_args(&args).expect_err("explicit run is not supported");
+        assert_eq!(err.kind, RagloomErrorKind::InvalidInput);
+        assert!(err.to_string().contains("omit command to run ingestion"));
+    }
+
+    #[test]
+    fn parse_args_check_command_still_requires_runtime_flags() {
+        let args = vec![
+            "ragloom".to_string(),
+            "check".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+            "--qdrant-url".to_string(),
+            "http://qdrant".to_string(),
+            "--collection".to_string(),
+            "docs".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("expected missing OpenAI API key");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(
+            err.to_string()
+                .contains("missing required flag for openai backend: --openai-api-key")
+        );
+    }
+
+    #[test]
     fn parse_args_supports_inline_version_flag_before_required_validation() {
         let args = vec![
             "ragloom".to_string(),
@@ -2418,7 +2633,7 @@ sink:
             retry_max_backoff_ms: 2_000,
         };
 
-        let err = match prepare_startup(&cfg).await {
+        let err = match prepare_startup(&cfg, true).await {
             Ok(_) => panic!("expected embedding client construction error"),
             Err(err) => err,
         };
@@ -2598,6 +2813,92 @@ sink:
             source.to_string().contains(
                 "unknown OpenAI model for collection vector size: text-embedding-unknown"
             )
+        );
+    }
+
+    #[test]
+    fn validate_startup_summary_reports_router_defaults() {
+        let cfg = sample_run_config();
+
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let summary = runtime.block_on(validate_startup(&cfg)).expect("summary");
+
+        assert_eq!(
+            summary,
+            StartupValidationSummary {
+                source_kind: "filesystem".to_string(),
+                source_target: "/tmp/docs".to_string(),
+                embed_backend: "http".to_string(),
+                chunker_selection: "router".to_string(),
+                bootstrap: BootstrapPlan::Disabled,
+            }
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
+    #[tokio::test]
+    async fn validate_startup_render_reports_effective_startup_choices() {
+        let cfg = RunConfig {
+            create_collection_if_missing: true,
+            collection_vector_size: Some(384),
+            ..sample_run_config()
+        };
+
+        let summary = validate_startup(&cfg).await.expect("summary");
+        let rendered = summary.render();
+
+        assert!(rendered.contains("ragloom dry-run"));
+        assert!(rendered.contains("source_kind=filesystem"));
+        assert!(rendered.contains("source_target=/tmp/docs"));
+        assert!(rendered.contains("embed_backend=http"));
+        assert!(rendered.contains("chunker=router"));
+        assert!(rendered.contains("bootstrap=would ensure collection exists (vector_size=384)"));
+    }
+
+    #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
+    #[tokio::test]
+    async fn validate_startup_dry_run_skips_qdrant_writes() {
+        let (qdrant_url, server) = spawn_qdrant_request_counter_server();
+        let cfg = RunConfig {
+            qdrant_url,
+            create_collection_if_missing: true,
+            collection_vector_size: Some(384),
+            ..sample_run_config()
+        };
+
+        let summary = validate_startup(&cfg).await.expect("summary");
+        server.stop.send(()).expect("stop");
+        let requests = server.handle.join().expect("join");
+
+        assert_eq!(
+            summary.bootstrap,
+            BootstrapPlan::WouldEnsureCollection { vector_size: 384 }
+        );
+        assert_eq!(requests, 0);
+    }
+
+    #[tokio::test]
+    async fn validate_startup_surfaces_bootstrap_prerequisite_errors_without_io() {
+        let cfg = RunConfig {
+            create_collection_if_missing: true,
+            collection_vector_size: None,
+            ..sample_run_config()
+        };
+
+        let err = validate_startup(&cfg)
+            .await
+            .expect_err("expected config error");
+
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(
+            err.to_string()
+                .contains("failed to bootstrap Qdrant collection")
+        );
+        let source = std::error::Error::source(&err).expect("source");
+        assert!(
+            source
+                .to_string()
+                .contains("http backend requires --collection-vector-size")
         );
     }
 
