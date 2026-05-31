@@ -15,15 +15,20 @@ use ragloom::observability::health::{HealthServer, HealthState};
 use ragloom::observability::metrics::IngestionMetrics;
 use ragloom::pipeline::runtime::{
     AckingExecutor, AsyncRuntime, IngestionSummary, LiveRetryPolicy, PipelineExecutor, RetryPolicy,
-    Runtime, RuntimeExitReason, run_worker_with_live_retry_and_metrics,
+    Runtime, RuntimeExitReason, run_worker_with_live_retry_failed_work_and_metrics,
 };
 use ragloom::sink::qdrant::{QdrantConfig, QdrantSink};
-use ragloom::source::runtime::{RunSource, USAGE, prepare_source_runtime, resolve_run_source};
+use ragloom::source::runtime::{RunSource, prepare_source_runtime, resolve_run_source};
+use ragloom::state::failed::{
+    FailedWorkJournal, FailedWorkRecord, FileFailedWorkStore, failed_work_path_from_state_path,
+    pending_failed_work,
+};
 
 #[cfg(test)]
 mod test_support;
 
 const CONFIG_RELOAD_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const CLI_USAGE: &str = "usage: ragloom [check|dry-run|replay-failed] [--config <path>] [--source-kind <filesystem|s3>] [--dir <path>] [--s3-bucket <name>] [--s3-prefix <prefix>] --qdrant-url <url> --collection <name> [--state-path <path>] [--health-addr <host:port>] [--retry-max-attempts <n>] [--embed-backend <openai|http>] (omit command to run ingestion)";
 
 /// Runtime configuration constructed from CLI arguments.
 ///
@@ -57,6 +62,11 @@ pub struct RunConfig {
     pub retry_max_backoff_ms: u64,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ReplayFailedConfig {
+    pub state_path: String,
+}
+
 /// Top-level CLI command selected by argument parsing.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ParsedCommand {
@@ -65,6 +75,7 @@ pub enum ParsedCommand {
     Run(Box<RunConfig>),
     Check(Box<RunConfig>),
     DryRun(Box<RunConfig>),
+    ReplayFailed(ReplayFailedConfig),
     Help,
     Version,
 }
@@ -109,6 +120,7 @@ enum RawParsedCommand {
     Run(Box<RawCliArgs>),
     Check(Box<RawCliArgs>),
     DryRun(Box<RawCliArgs>),
+    ReplayFailed(Box<RawCliArgs>),
     Help,
     Version,
 }
@@ -162,6 +174,9 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
                 file_config.as_ref(),
             )?)))
         }
+        RawParsedCommand::ReplayFailed(raw) => Ok(ParsedCommand::ReplayFailed(
+            build_replay_failed_config(*raw)?,
+        )),
         RawParsedCommand::Run(raw) => {
             let file_config = raw
                 .config_path
@@ -185,7 +200,7 @@ fn parse_reload_run_config_from_contents(
         RawParsedCommand::Run(raw)
         | RawParsedCommand::Check(raw)
         | RawParsedCommand::DryRun(raw) => *raw,
-        RawParsedCommand::Help | RawParsedCommand::Version => {
+        RawParsedCommand::ReplayFailed(_) | RawParsedCommand::Help | RawParsedCommand::Version => {
             return Err(
                 RagloomError::from_kind(RagloomErrorKind::Config).with_context(format!(
                     "config reload expected runtime command for {}",
@@ -209,9 +224,10 @@ fn parse_raw_cli_args(args: &[String]) -> Result<RawParsedCommand, RagloomError>
         command = match arg.as_str() {
             "check" => "check",
             "dry-run" => "dry-run",
+            "replay-failed" => "replay-failed",
             other => {
                 return Err(cli_invalid_input(format!(
-                    "unknown command: {other} (expected: check|dry-run, or omit command to run ingestion)"
+                    "unknown command: {other} (expected: check|dry-run|replay-failed, or omit command to run ingestion)"
                 )));
             }
         };
@@ -294,6 +310,7 @@ fn parse_raw_cli_args(args: &[String]) -> Result<RawParsedCommand, RagloomError>
         "run" => RawParsedCommand::Run(Box::new(raw)),
         "check" => RawParsedCommand::Check(Box::new(raw)),
         "dry-run" => RawParsedCommand::DryRun(Box::new(raw)),
+        "replay-failed" => RawParsedCommand::ReplayFailed(Box::new(raw)),
         _ => unreachable!("validated command"),
     })
 }
@@ -625,6 +642,130 @@ fn build_run_config(
     })
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct ReplayFailedFileConfig {
+    #[serde(default)]
+    state: Option<ReplayFailedStateConfig>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ReplayFailedStateConfig {
+    path: String,
+}
+
+fn build_replay_failed_config(raw: RawCliArgs) -> Result<ReplayFailedConfig, RagloomError> {
+    ensure_replay_failed_flags_supported(&raw)?;
+
+    if raw.state_path.is_none() && raw.config_path.is_none() {
+        return Err(cli_config_error(
+            "replay-failed requires --state-path or --config",
+        ));
+    }
+
+    let config_provided = raw.config_path.is_some();
+    let file_state_path = raw
+        .config_path
+        .as_deref()
+        .map(load_replay_failed_file_config)
+        .transpose()?
+        .and_then(|cfg| cfg.state.map(|state| state.path));
+
+    if raw.state_path.is_none() && config_provided && file_state_path.is_none() {
+        return Err(cli_config_error(
+            "replay-failed requires state.path in --config or an explicit --state-path",
+        ));
+    }
+
+    let state_path = raw
+        .state_path
+        .or(file_state_path)
+        .ok_or_else(|| cli_config_error("replay-failed requires --state-path or --config"))?;
+
+    if state_path.trim().is_empty() {
+        return Err(cli_config_error("--state-path or state.path is empty"));
+    }
+
+    Ok(ReplayFailedConfig { state_path })
+}
+
+fn ensure_replay_failed_flags_supported(raw: &RawCliArgs) -> Result<(), RagloomError> {
+    let unsupported = [
+        raw.source_kind.as_ref().map(|_| "--source-kind"),
+        raw.dir.as_ref().map(|_| "--dir"),
+        raw.s3_bucket.as_ref().map(|_| "--s3-bucket"),
+        raw.s3_prefix.as_ref().map(|_| "--s3-prefix"),
+        raw.embed_backend.as_ref().map(|_| "--embed-backend"),
+        raw.embed_url.as_ref().map(|_| "--embed-url"),
+        raw.embed_model.as_ref().map(|_| "--embed-model"),
+        raw.openai_endpoint.as_ref().map(|_| "--openai-endpoint"),
+        raw.openai_api_key.as_ref().map(|_| "--openai-api-key"),
+        raw.openai_model.as_ref().map(|_| "--openai-model"),
+        raw.qdrant_url.as_ref().map(|_| "--qdrant-url"),
+        raw.collection.as_ref().map(|_| "--collection"),
+        raw.health_addr.as_ref().map(|_| "--health-addr"),
+        raw.collection_vector_size
+            .as_ref()
+            .map(|_| "--collection-vector-size"),
+        raw.chunker_strategy.as_ref().map(|_| "--chunker-strategy"),
+        raw.size_metric.as_ref().map(|_| "--size-metric"),
+        raw.size_max.as_ref().map(|_| "--size-max"),
+        raw.size_min.as_ref().map(|_| "--size-min"),
+        raw.size_overlap.as_ref().map(|_| "--size-overlap"),
+        raw.tokenizer.as_ref().map(|_| "--tokenizer"),
+        raw.chunker_mode.as_ref().map(|_| "--chunker-mode"),
+        raw.chunker_single.as_ref().map(|_| "--chunker-single"),
+        raw.semantic_provider
+            .as_ref()
+            .map(|_| "--semantic-provider"),
+        raw.semantic_percentile
+            .as_ref()
+            .map(|_| "--semantic-percentile"),
+        raw.retry_max_attempts
+            .as_ref()
+            .map(|_| "--retry-max-attempts"),
+        raw.retry_max_queued.as_ref().map(|_| "--retry-max-queued"),
+        raw.retry_initial_backoff_ms
+            .as_ref()
+            .map(|_| "--retry-initial-backoff-ms"),
+        raw.retry_max_backoff_ms
+            .as_ref()
+            .map(|_| "--retry-max-backoff-ms"),
+    ]
+    .into_iter()
+    .flatten()
+    .next();
+
+    if raw.create_collection_if_missing {
+        return Err(cli_invalid_input(
+            "replay-failed only accepts --config and --state-path",
+        ));
+    }
+    if raw.enable_semantic {
+        return Err(cli_invalid_input(
+            "replay-failed only accepts --config and --state-path",
+        ));
+    }
+    if unsupported.is_some() {
+        return Err(cli_invalid_input(
+            "replay-failed only accepts --config and --state-path",
+        ));
+    }
+
+    Ok(())
+}
+
+fn load_replay_failed_file_config(path: &str) -> Result<ReplayFailedFileConfig, RagloomError> {
+    let yaml = std::fs::read_to_string(path).map_err(|e| {
+        RagloomError::new(RagloomErrorKind::Io, e)
+            .with_context(format!("failed to read config file: {path}"))
+    })?;
+
+    serde_yaml::from_str(&yaml).map_err(|e| {
+        RagloomError::from_kind(RagloomErrorKind::Config)
+            .with_context(format!("failed to parse config file: {path}: {e}"))
+    })
+}
+
 fn load_pipeline_config(path: &str) -> Result<PipelineConfig, RagloomError> {
     let yaml = std::fs::read_to_string(path).map_err(|e| {
         RagloomError::new(RagloomErrorKind::Io, e)
@@ -640,7 +781,7 @@ fn load_pipeline_config(path: &str) -> Result<PipelineConfig, RagloomError> {
 fn cli_invalid_input(message: impl Into<String>) -> RagloomError {
     let message = message.into();
     RagloomError::from_kind(RagloomErrorKind::InvalidInput)
-        .with_context(format!("{message}\n{USAGE}"))
+        .with_context(format!("{message}\n{CLI_USAGE}"))
 }
 
 fn validate_boolean_flag(
@@ -666,7 +807,8 @@ where
 
 fn cli_config_error(message: impl Into<String>) -> RagloomError {
     let message = message.into();
-    RagloomError::from_kind(RagloomErrorKind::Config).with_context(format!("{message}\n{USAGE}"))
+    RagloomError::from_kind(RagloomErrorKind::Config)
+        .with_context(format!("{message}\n{CLI_USAGE}"))
 }
 
 fn parse_code_lang(s: &str) -> Result<ragloom::transform::chunker::code::Language, RagloomError> {
@@ -1063,7 +1205,7 @@ async fn try_main() -> Result<(), RagloomError> {
     let args: Vec<String> = std::env::args().collect();
     let cfg = match parse_args(&args)? {
         ParsedCommand::Help => {
-            println!("{USAGE}");
+            println!("{CLI_USAGE}");
             return Ok(());
         }
         ParsedCommand::Version => {
@@ -1078,6 +1220,11 @@ async fn try_main() -> Result<(), RagloomError> {
         ParsedCommand::DryRun(cfg) => {
             let summary = validate_startup(&cfg).await?;
             println!("{}", summary.render());
+            return Ok(());
+        }
+        ParsedCommand::ReplayFailed(cfg) => {
+            let replayed = replay_failed_command(&cfg).await?;
+            println!("ragloom replay-failed requeued {replayed} work items");
             return Ok(());
         }
         ParsedCommand::Run(cfg) => *cfg,
@@ -1191,6 +1338,47 @@ async fn try_main() -> Result<(), RagloomError> {
     }
 }
 
+async fn replay_failed_command(cfg: &ReplayFailedConfig) -> Result<usize, RagloomError> {
+    let failed_path = failed_work_path_from_state_path(&cfg.state_path);
+    let mut wal = ragloom::state::wal::FileWal::open(&cfg.state_path)
+        .map_err(|e| e.with_context("failed to initialize persistent WAL"))?;
+    let mut failed_store = FileFailedWorkStore::open(&failed_path)
+        .map_err(|e| e.with_context("failed to initialize failed-work store"))?;
+
+    replay_failed_into_wal(&mut wal, &mut failed_store)
+}
+
+fn replay_failed_into_wal(
+    wal: &mut impl ragloom::state::wal::WalStore,
+    failed_store: &mut impl ragloom::state::failed::FailedWorkStore,
+) -> Result<usize, RagloomError> {
+    let records = failed_store
+        .read_all()
+        .map_err(|e| e.with_context("failed to read failed-work store"))?;
+
+    let pending = pending_failed_work(&records);
+    let replayed = pending.len();
+    for item in pending {
+        wal.append(item.work.clone())
+            .map_err(|e| e.with_context("failed to append replayed work into WAL"))?;
+        failed_store
+            .append(FailedWorkRecord::Requeued {
+                exhausted_id: item.id,
+            })
+            .map_err(|e| e.with_context("failed to mark failed work as requeued"))?;
+
+        tracing::info!(
+            event.name = "ragloom.failed_work.requeued",
+            exhausted_id = item.id,
+            terminal_reason = ?item.terminal_reason,
+            attempts = item.attempts,
+            "ragloom.failed_work.requeued"
+        );
+    }
+
+    Ok(replayed)
+}
+
 async fn start_running_system(cfg: &RunConfig) -> Result<RunningSystem, RagloomError> {
     let health_state = HealthState::starting();
     let metrics = IngestionMetrics::default();
@@ -1225,6 +1413,17 @@ async fn start_running_system(cfg: &RunConfig) -> Result<RunningSystem, RagloomE
             return Err(err);
         }
     };
+    let failed_work =
+        match FileFailedWorkStore::open(failed_work_path_from_state_path(&cfg.state_path))
+            .map(FailedWorkJournal::new)
+            .map_err(|e| e.with_context("failed to initialize failed-work store"))
+        {
+            Ok(store) => Some(store),
+            Err(err) => {
+                health_state.mark_startup_failed();
+                return Err(err);
+            }
+        };
 
     let previously_observed_paths = {
         let guard = wal.lock().await;
@@ -1281,12 +1480,14 @@ async fn start_running_system(cfg: &RunConfig) -> Result<RunningSystem, RagloomE
     let summary_for_worker = summary.clone();
     let metrics_for_worker = metrics.clone();
     let live_retry_policy_for_worker = live_retry_policy.clone();
+    let failed_work_for_worker = failed_work.clone();
 
     let worker = tokio::spawn(async move {
-        run_worker_with_live_retry_and_metrics(
+        run_worker_with_live_retry_failed_work_and_metrics(
             queue,
             executor,
             live_retry_policy_for_worker,
+            failed_work_for_worker,
             Some(summary_for_worker),
             Some(metrics_for_worker),
         )
@@ -2119,6 +2320,101 @@ sink:
 
         let cmd = parse_args(&args).expect("help command");
         assert_eq!(cmd, ParsedCommand::Help);
+    }
+
+    #[test]
+    fn parse_args_returns_replay_failed_command() {
+        let args = vec![
+            "ragloom".to_string(),
+            "replay-failed".to_string(),
+            "--state-path".to_string(),
+            ".state/ragloom.ndjson".to_string(),
+        ];
+
+        let cmd = parse_args(&args).expect("replay-failed command");
+        assert_eq!(
+            cmd,
+            ParsedCommand::ReplayFailed(ReplayFailedConfig {
+                state_path: ".state/ragloom.ndjson".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_args_replay_failed_reads_state_path_from_config_only() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"
+state:
+  path: ".state/from-config.ndjson"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "replay-failed".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+        ];
+
+        let cmd = parse_args(&args).expect("replay-failed command");
+        assert_eq!(
+            cmd,
+            ParsedCommand::ReplayFailed(ReplayFailedConfig {
+                state_path: ".state/from-config.ndjson".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_args_replay_failed_rejects_config_without_state_path() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(b"chunking:\n  strategy: recursive\n")
+            .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "replay-failed".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("must reject config without state.path");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(
+            err.to_string().contains(
+                "replay-failed requires state.path in --config or an explicit --state-path"
+            )
+        );
+    }
+
+    #[test]
+    fn parse_args_replay_failed_rejects_runtime_flags() {
+        let args = vec![
+            "ragloom".to_string(),
+            "replay-failed".to_string(),
+            "--state-path".to_string(),
+            ".state/ragloom.ndjson".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("must reject runtime flags");
+        assert_eq!(err.kind, RagloomErrorKind::InvalidInput);
+        assert!(err.to_string().contains("replay-failed only accepts"));
+    }
+
+    #[test]
+    fn parse_args_replay_failed_requires_state_path_or_config() {
+        let args = vec!["ragloom".to_string(), "replay-failed".to_string()];
+
+        let err = parse_args(&args).expect_err("must require explicit replay input");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(
+            err.to_string()
+                .contains("replay-failed requires --state-path or --config")
+        );
     }
 
     #[test]
@@ -3228,5 +3524,108 @@ sink:
         let err = parse_args(&args).expect_err("should fail parse");
         assert_eq!(err.kind, RagloomErrorKind::Config);
         assert!(err.to_string().contains("failed to parse config file"));
+    }
+
+    #[test]
+    fn replay_failed_into_wal_appends_original_work_and_marks_requeued() {
+        let mut wal = ragloom::state::wal::InMemoryWal::new();
+        let mut failed = ragloom::state::failed::InMemoryFailedWorkStore::new();
+        let work = ragloom::state::wal::WalRecord::WorkItemV2 {
+            fingerprint: ragloom::ids::FileFingerprint {
+                canonical_path: "/x/a.txt".to_string(),
+                size_bytes: 10,
+                mtime_unix_secs: 100,
+                etag: None,
+            },
+        };
+
+        failed
+            .append(FailedWorkRecord::Exhausted {
+                id: 1,
+                work: work.clone(),
+                failure_kind: ragloom::state::failed::FailedWorkFailureKind::Embed,
+                terminal_reason: ragloom::state::failed::FailedWorkTerminalReason::RetryExhausted,
+                attempts: 2,
+            })
+            .expect("append exhausted");
+
+        let replayed = replay_failed_into_wal(&mut wal, &mut failed).expect("replay");
+        assert_eq!(replayed, 1);
+        assert_eq!(wal.read_all().expect("read wal"), vec![work]);
+        assert_eq!(
+            failed.read_all().expect("read failed"),
+            vec![
+                FailedWorkRecord::Exhausted {
+                    id: 1,
+                    work: ragloom::state::wal::WalRecord::WorkItemV2 {
+                        fingerprint: ragloom::ids::FileFingerprint {
+                            canonical_path: "/x/a.txt".to_string(),
+                            size_bytes: 10,
+                            mtime_unix_secs: 100,
+                            etag: None,
+                        },
+                    },
+                    failure_kind: ragloom::state::failed::FailedWorkFailureKind::Embed,
+                    terminal_reason:
+                        ragloom::state::failed::FailedWorkTerminalReason::RetryExhausted,
+                    attempts: 2,
+                },
+                FailedWorkRecord::Requeued { exhausted_id: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn replay_failed_into_wal_skips_already_requeued_entries() {
+        let mut wal = ragloom::state::wal::InMemoryWal::new();
+        let mut failed = ragloom::state::failed::InMemoryFailedWorkStore::new();
+
+        failed
+            .append(FailedWorkRecord::Exhausted {
+                id: 1,
+                work: ragloom::state::wal::WalRecord::DeleteDocument {
+                    canonical_path: "/x/a.txt".to_string(),
+                },
+                failure_kind: ragloom::state::failed::FailedWorkFailureKind::InvalidInput,
+                terminal_reason: ragloom::state::failed::FailedWorkTerminalReason::NonRetryable,
+                attempts: 1,
+            })
+            .expect("append exhausted");
+        failed
+            .append(FailedWorkRecord::Requeued { exhausted_id: 1 })
+            .expect("append requeued");
+
+        let replayed = replay_failed_into_wal(&mut wal, &mut failed).expect("replay");
+        assert_eq!(replayed, 0);
+        assert!(wal.read_all().expect("read wal").is_empty());
+    }
+
+    #[test]
+    fn replay_failed_into_wal_is_at_least_once_after_partial_prior_replay() {
+        let mut wal = ragloom::state::wal::InMemoryWal::new();
+        let mut failed = ragloom::state::failed::InMemoryFailedWorkStore::new();
+        let work = ragloom::state::wal::WalRecord::WorkItemV2 {
+            fingerprint: ragloom::ids::FileFingerprint {
+                canonical_path: "/x/a.txt".to_string(),
+                size_bytes: 10,
+                mtime_unix_secs: 100,
+                etag: None,
+            },
+        };
+
+        wal.append(work.clone()).expect("append prior replay");
+        failed
+            .append(FailedWorkRecord::Exhausted {
+                id: 1,
+                work: work.clone(),
+                failure_kind: ragloom::state::failed::FailedWorkFailureKind::Embed,
+                terminal_reason: ragloom::state::failed::FailedWorkTerminalReason::RetryExhausted,
+                attempts: 2,
+            })
+            .expect("append exhausted");
+
+        let replayed = replay_failed_into_wal(&mut wal, &mut failed).expect("replay");
+        assert_eq!(replayed, 1);
+        assert_eq!(wal.read_all().expect("read wal"), vec![work.clone(), work]);
     }
 }

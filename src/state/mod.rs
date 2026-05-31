@@ -5,6 +5,7 @@
 //! not be tied to a specific storage engine, so we define a small trait surface
 //! that keeps the system open for extension.
 
+pub mod failed;
 pub mod wal;
 
 /// Persistent state store abstraction.

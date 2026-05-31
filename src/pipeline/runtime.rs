@@ -9,6 +9,7 @@ use crate::error::{RagloomError, RagloomErrorKind};
 use crate::observability::metrics::IngestionMetrics;
 use crate::pipeline::planner::Planner;
 use crate::source::Source;
+use crate::state::failed::{FailedWorkFailureKind, FailedWorkJournal, FailedWorkTerminalReason};
 use crate::state::wal::{InMemoryWal, WalRecord, WalStore, unacked_work_items};
 
 use std::collections::VecDeque;
@@ -494,7 +495,7 @@ struct RetryItem {
 /// processing (executor), making backpressure and shutdown behavior easy to test.
 pub async fn run_worker(mut queue: WorkQueue, executor: impl WorkExecutor) {
     let live_policy = LiveRetryPolicy::new(RetryPolicy::disabled()).expect("disabled policy");
-    run_worker_with_retry_inner(&mut queue, executor, live_policy, None, None).await;
+    run_worker_with_retry_inner(&mut queue, executor, live_policy, None, None, None).await;
 }
 
 /// Runs a worker loop with a bounded in-process retry queue.
@@ -529,7 +530,7 @@ pub async fn run_worker_with_retry_and_metrics(
         return;
     }
     let live_policy = LiveRetryPolicy::new(policy).expect("validated retry policy");
-    run_worker_with_retry_inner(&mut queue, executor, live_policy, summary, metrics).await;
+    run_worker_with_retry_inner(&mut queue, executor, live_policy, None, summary, metrics).await;
 }
 
 pub async fn run_worker_with_live_retry_and_metrics(
@@ -539,13 +540,25 @@ pub async fn run_worker_with_live_retry_and_metrics(
     summary: Option<IngestionSummary>,
     metrics: Option<IngestionMetrics>,
 ) {
-    run_worker_with_retry_inner(&mut queue, executor, policy, summary, metrics).await;
+    run_worker_with_retry_inner(&mut queue, executor, policy, None, summary, metrics).await;
+}
+
+pub async fn run_worker_with_live_retry_failed_work_and_metrics(
+    mut queue: WorkQueue,
+    executor: impl WorkExecutor,
+    policy: LiveRetryPolicy,
+    failed_work: Option<FailedWorkJournal>,
+    summary: Option<IngestionSummary>,
+    metrics: Option<IngestionMetrics>,
+) {
+    run_worker_with_retry_inner(&mut queue, executor, policy, failed_work, summary, metrics).await;
 }
 
 async fn run_worker_with_retry_inner(
     queue: &mut WorkQueue,
     executor: impl WorkExecutor,
     policy: LiveRetryPolicy,
+    failed_work: Option<FailedWorkJournal>,
     summary: Option<IngestionSummary>,
     metrics: Option<IngestionMetrics>,
 ) {
@@ -596,69 +609,93 @@ async fn run_worker_with_retry_inner(
         };
         let canonical_path = canonical_path.as_deref();
 
-        tracing::info_span!(
+        if let Err(err) = tracing::info_span!(
             "ragloom.worker.execute",
             record_type,
             canonical_path = canonical_path,
             retry.attempt = attempt,
             retry.max_attempts = policy_snapshot.max_attempts,
         )
-        .in_scope(|| executor.execute(record.clone()))
+        .in_scope(|| async { executor.execute(record.clone()).await })
         .await
-        .map_or_else(
-            |err| {
-                let retryable = is_retryable_error_kind(err.kind);
-                let should_retry = policy_snapshot.should_retry(&err, attempt);
-                if should_retry && retries.len() < policy_snapshot.max_queued_retries {
-                    let next_attempt = attempt + 1;
-                    let delay = policy_snapshot.delay_before_attempt(next_attempt);
-                    tracing::warn!(
-                        event.name = "ragloom.retry.scheduled",
-                        record_type,
-                        canonical_path = canonical_path,
-                        retry.attempt = attempt,
-                        retry.next_attempt = next_attempt,
-                        retry.max_attempts = policy_snapshot.max_attempts,
-                        retry.backoff_ms = delay.as_millis() as u64,
-                        retry.queue_len = retries.len() + 1,
-                        retry.max_queued_retries = policy_snapshot.max_queued_retries,
-                        error.kind = %err.kind,
-                        error.message = %err,
-                        "ragloom.retry.scheduled"
-                    );
-                    if let Some(metrics) = &metrics {
-                        metrics.record_retry_scheduled(retries.len() + 1);
-                    }
-                    retries.push_back(RetryItem {
-                        record,
-                        attempt: next_attempt,
-                        delay,
-                    });
-                } else {
-                    if let Some(summary) = &summary {
-                        summary.record_failure();
-                    }
-                    if let Some(metrics) = &metrics {
-                        metrics.record_failure();
-                        if retryable {
-                            metrics.record_retry_exhausted(retries.len());
-                        }
-                    }
-                    tracing::warn!(
-                        event.name = "ragloom.ingest.failed",
-                        record_type,
-                        canonical_path = canonical_path,
-                        retry.attempt = attempt,
-                        retry.max_attempts = policy_snapshot.max_attempts,
-                        retry.queue_len = retries.len(),
-                        error.kind = %err.kind,
-                        error.message = %err,
-                        "ragloom.ingest.failed"
-                    );
+        {
+            let retryable = is_retryable_error_kind(err.kind);
+            let should_retry = policy_snapshot.should_retry(&err, attempt);
+            if should_retry && retries.len() < policy_snapshot.max_queued_retries {
+                let next_attempt = attempt + 1;
+                let delay = policy_snapshot.delay_before_attempt(next_attempt);
+                tracing::warn!(
+                    event.name = "ragloom.retry.scheduled",
+                    record_type,
+                    canonical_path = canonical_path,
+                    retry.attempt = attempt,
+                    retry.next_attempt = next_attempt,
+                    retry.max_attempts = policy_snapshot.max_attempts,
+                    retry.backoff_ms = delay.as_millis() as u64,
+                    retry.queue_len = retries.len() + 1,
+                    retry.max_queued_retries = policy_snapshot.max_queued_retries,
+                    error.kind = %err.kind,
+                    error.message = %err,
+                    "ragloom.retry.scheduled"
+                );
+                if let Some(metrics) = &metrics {
+                    metrics.record_retry_scheduled(retries.len() + 1);
                 }
-            },
-            |_| {},
-        );
+                retries.push_back(RetryItem {
+                    record,
+                    attempt: next_attempt,
+                    delay,
+                });
+            } else {
+                if let Some(failed_work) = &failed_work {
+                    let terminal_reason = if retryable {
+                        FailedWorkTerminalReason::RetryExhausted
+                    } else {
+                        FailedWorkTerminalReason::NonRetryable
+                    };
+
+                    if let Err(persist_err) = failed_work
+                        .append_exhausted(
+                            record.clone(),
+                            FailedWorkFailureKind::from_error_kind(err.kind),
+                            terminal_reason,
+                            attempt,
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            event.name = "ragloom.failed_work.persist_failed",
+                            record_type,
+                            canonical_path = canonical_path,
+                            error.kind = %persist_err.kind,
+                            error.message = %persist_err,
+                            "ragloom.failed_work.persist_failed"
+                        );
+                    }
+                }
+
+                if let Some(summary) = &summary {
+                    summary.record_failure();
+                }
+                if let Some(metrics) = &metrics {
+                    metrics.record_failure();
+                    if retryable {
+                        metrics.record_retry_exhausted(retries.len());
+                    }
+                }
+                tracing::warn!(
+                    event.name = "ragloom.ingest.failed",
+                    record_type,
+                    canonical_path = canonical_path,
+                    retry.attempt = attempt,
+                    retry.max_attempts = policy_snapshot.max_attempts,
+                    retry.queue_len = retries.len(),
+                    error.kind = %err.kind,
+                    error.message = %err,
+                    "ragloom.ingest.failed"
+                );
+            }
+        }
     }
 }
 
@@ -2274,6 +2311,110 @@ mod tests {
         let snapshot = summary.snapshot();
         assert_eq!(snapshot.failed_files, 1);
         assert_eq!(snapshot.pending_files, 0);
+    }
+
+    #[tokio::test]
+    async fn retry_worker_persists_retry_exhausted_work_item() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let failed_work = crate::state::failed::FailedWorkJournal::new(
+            crate::state::failed::InMemoryFailedWorkStore::new(),
+        );
+        let failed_work_for_worker = failed_work.clone();
+        let executor = ScriptedExecutor::new(vec![
+            Err(RagloomErrorKind::Embed),
+            Err(RagloomErrorKind::Embed),
+        ]);
+
+        let worker = tokio::spawn(async move {
+            run_worker_with_live_retry_failed_work_and_metrics(
+                rx,
+                executor,
+                LiveRetryPolicy::new(RetryPolicy {
+                    max_attempts: 2,
+                    max_queued_retries: 1,
+                    initial_backoff: std::time::Duration::ZERO,
+                    max_backoff: std::time::Duration::ZERO,
+                })
+                .expect("policy"),
+                Some(failed_work_for_worker),
+                None,
+                None,
+            )
+            .await;
+        });
+
+        let work = WalRecord::WorkItemV2 {
+            fingerprint: crate::ids::FileFingerprint {
+                canonical_path: "/x/a.txt".to_string(),
+                size_bytes: 10,
+                mtime_unix_secs: 100,
+                etag: None,
+            },
+        };
+
+        tx.send(work.clone()).await.expect("send");
+        drop(tx);
+        worker.await.expect("worker");
+
+        let records = failed_work.read_all().await.expect("read failed-work");
+        assert_eq!(
+            records,
+            vec![crate::state::failed::FailedWorkRecord::Exhausted {
+                id: 1,
+                work,
+                failure_kind: crate::state::failed::FailedWorkFailureKind::Embed,
+                terminal_reason: crate::state::failed::FailedWorkTerminalReason::RetryExhausted,
+                attempts: 2,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_worker_persists_non_retryable_terminal_failure() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let failed_work = crate::state::failed::FailedWorkJournal::new(
+            crate::state::failed::InMemoryFailedWorkStore::new(),
+        );
+        let failed_work_for_worker = failed_work.clone();
+        let executor = ScriptedExecutor::new(vec![Err(RagloomErrorKind::InvalidInput)]);
+
+        let worker = tokio::spawn(async move {
+            run_worker_with_live_retry_failed_work_and_metrics(
+                rx,
+                executor,
+                LiveRetryPolicy::new(RetryPolicy {
+                    max_attempts: 3,
+                    max_queued_retries: 2,
+                    initial_backoff: std::time::Duration::ZERO,
+                    max_backoff: std::time::Duration::ZERO,
+                })
+                .expect("policy"),
+                Some(failed_work_for_worker),
+                None,
+                None,
+            )
+            .await;
+        });
+
+        let work = WalRecord::DeleteDocument {
+            canonical_path: "/x/a.txt".to_string(),
+        };
+
+        tx.send(work.clone()).await.expect("send");
+        drop(tx);
+        worker.await.expect("worker");
+
+        let records = failed_work.read_all().await.expect("read failed-work");
+        assert_eq!(
+            records,
+            vec![crate::state::failed::FailedWorkRecord::Exhausted {
+                id: 1,
+                work,
+                failure_kind: crate::state::failed::FailedWorkFailureKind::InvalidInput,
+                terminal_reason: crate::state::failed::FailedWorkTerminalReason::NonRetryable,
+                attempts: 1,
+            }]
+        );
     }
 
     #[tokio::test]
