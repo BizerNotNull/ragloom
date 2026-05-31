@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+- Persistent local failed-work journal at `failed.ndjson` beside the WAL so
+  exhausted or terminal ingest work can be inspected and operator-replayed
+  without changing WAL acknowledgement or startup replay semantics.
+- Minimal `replay-failed` CLI command that requeues pending failed work back
+  into the WAL using only `--state-path` or `--config`.
+
+### Changed
+- Retry exhaustion no longer stops at logs and counters: worker terminal
+  failures now persist a sanitized failure class plus the original scheduled
+  work record, without recording secrets or full document contents.
+
 ## [0.4.0] - 2026-05-26
 
 ### Added

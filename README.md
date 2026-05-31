@@ -56,7 +56,7 @@ Experimental or best-effort paths:
 
 Not supported yet:
 
-- persistent dead-letter queues
+- broad job-management or dead-letter queue subsystems beyond the local failed-work journal
 - built-in collection lifecycle management
 
 ### v0.4 support matrix
@@ -430,6 +430,36 @@ Retries are not persisted as separate WAL records. If the process stops while
 retries are queued, unacknowledged work is replayed from the WAL on the next
 startup.
 
+When a work item exhausts retries or fails terminally without retry, Ragloom
+also appends a sanitized failed-work record to `failed.ndjson` in the same
+directory as the WAL. Failed-work records include the original scheduled
+`WalRecord`, retry attempt count, and a small failure classification only; they
+do not include secrets, embedding payloads, or full document contents.
+
+Inspect failed work directly from the local NDJSON file, for example:
+
+```bash
+cat .ragloom/failed.ndjson
+```
+
+To requeue pending failed work back into the WAL for operator replay, run:
+
+```bash
+ragloom replay-failed --state-path .ragloom/wal.ndjson
+```
+
+Or, if you already keep the state path in YAML:
+
+```bash
+ragloom replay-failed --config ./ragloom.yaml
+```
+
+`replay-failed` requires either `--state-path` or `--config`. It does not require
+runtime ingest flags such as `--dir`, `--qdrant-url`, or `--collection`.
+Replay is intentionally at-least-once: if a prior replay appended work into the
+WAL but crashed before marking the failed record requeued, rerunning
+`replay-failed` may append that work again rather than silently losing it.
+
 ## Architecture
 
 ```text
@@ -768,7 +798,7 @@ Do not share command output if it includes credentials or other sensitive respon
 - only Qdrant as a built-in sink
 - only UTF-8 text, Markdown, source code, text-extractable PDF loading, and deterministic DOCX text extraction
 - no general collection lifecycle management beyond optional first-run bootstrap
-- no persistent dead-letter queue yet
+- no broad persistent dead-letter queue or job-management subsystem
 
 ## Contributing
 
