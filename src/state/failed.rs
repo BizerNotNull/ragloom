@@ -354,12 +354,12 @@ fn open_failed_work_append_file(path: &Path) -> Result<File, RagloomError> {
 fn sync_failed_work_parent_dir(path: &Path) -> Result<(), RagloomError> {
     #[cfg(unix)]
     {
-        let parent = path.parent().ok_or_else(|| {
-            RagloomError::from_kind(RagloomErrorKind::State).with_context(format!(
-                "failed to sync failed-work parent directory: missing parent for {}",
-                path.display()
-            ))
-        })?;
+        let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        else {
+            return Ok(());
+        };
         File::open(parent)
             .map_err(|e| {
                 RagloomError::new(RagloomErrorKind::State, e).with_context(format!(
@@ -563,5 +563,11 @@ mod tests {
         let store = FileFailedWorkStore::open(&path).expect("open new store");
         assert!(path.exists());
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn failed_work_path_without_parent_skips_parent_sync_requirement() {
+        let path = Path::new("failed.ndjson");
+        sync_failed_work_parent_dir(path).expect("sync current-dir file parent should noop");
     }
 }
