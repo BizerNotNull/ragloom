@@ -9,9 +9,7 @@ use crate::error::{RagloomError, RagloomErrorKind};
 use crate::observability::metrics::IngestionMetrics;
 use crate::pipeline::planner::Planner;
 use crate::source::Source;
-use crate::state::failed::{
-    FailedWorkFailureKind, FailedWorkJournal, FailedWorkRecord, FailedWorkTerminalReason,
-};
+use crate::state::failed::{FailedWorkFailureKind, FailedWorkJournal, FailedWorkTerminalReason};
 use crate::state::wal::{InMemoryWal, WalRecord, WalStore, unacked_work_items};
 
 use std::collections::VecDeque;
@@ -656,38 +654,23 @@ async fn run_worker_with_retry_inner(
                         FailedWorkTerminalReason::NonRetryable
                     };
 
-                    match failed_work.next_id().await {
-                        Ok(id) => {
-                            if let Err(persist_err) = failed_work
-                                .append(FailedWorkRecord::Exhausted {
-                                    id,
-                                    work: record.clone(),
-                                    failure_kind: FailedWorkFailureKind::from_error_kind(err.kind),
-                                    terminal_reason,
-                                    attempts: attempt,
-                                })
-                                .await
-                            {
-                                tracing::error!(
-                                    event.name = "ragloom.failed_work.persist_failed",
-                                    record_type,
-                                    canonical_path = canonical_path,
-                                    error.kind = %persist_err.kind,
-                                    error.message = %persist_err,
-                                    "ragloom.failed_work.persist_failed"
-                                );
-                            }
-                        }
-                        Err(persist_err) => {
-                            tracing::error!(
-                                event.name = "ragloom.failed_work.read_failed",
-                                record_type,
-                                canonical_path = canonical_path,
-                                error.kind = %persist_err.kind,
-                                error.message = %persist_err,
-                                "ragloom.failed_work.read_failed"
-                            );
-                        }
+                    if let Err(persist_err) = failed_work
+                        .append_exhausted(
+                            record.clone(),
+                            FailedWorkFailureKind::from_error_kind(err.kind),
+                            terminal_reason,
+                            attempt,
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            event.name = "ragloom.failed_work.persist_failed",
+                            record_type,
+                            canonical_path = canonical_path,
+                            error.kind = %persist_err.kind,
+                            error.message = %persist_err,
+                            "ragloom.failed_work.persist_failed"
+                        );
                     }
                 }
 

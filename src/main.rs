@@ -662,6 +662,7 @@ fn build_replay_failed_config(raw: RawCliArgs) -> Result<ReplayFailedConfig, Rag
         ));
     }
 
+    let config_provided = raw.config_path.is_some();
     let file_state_path = raw
         .config_path
         .as_deref()
@@ -669,10 +670,16 @@ fn build_replay_failed_config(raw: RawCliArgs) -> Result<ReplayFailedConfig, Rag
         .transpose()?
         .and_then(|cfg| cfg.state.map(|state| state.path));
 
+    if raw.state_path.is_none() && config_provided && file_state_path.is_none() {
+        return Err(cli_config_error(
+            "replay-failed requires state.path in --config or an explicit --state-path",
+        ));
+    }
+
     let state_path = raw
         .state_path
         .or(file_state_path)
-        .unwrap_or_else(|| DEFAULT_STATE_PATH.to_string());
+        .ok_or_else(|| cli_config_error("replay-failed requires --state-path or --config"))?;
 
     if state_path.trim().is_empty() {
         return Err(cli_config_error("--state-path or state.path is empty"));
@@ -2357,6 +2364,28 @@ state:
             ParsedCommand::ReplayFailed(ReplayFailedConfig {
                 state_path: ".state/from-config.ndjson".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn parse_args_replay_failed_rejects_config_without_state_path() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(b"chunking:\n  strategy: recursive\n")
+            .expect("write config");
+
+        let args = vec![
+            "ragloom".to_string(),
+            "replay-failed".to_string(),
+            "--config".to_string(),
+            file.path().to_string_lossy().to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("must reject config without state.path");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(
+            err.to_string().contains(
+                "replay-failed requires state.path in --config or an explicit --state-path"
+            )
         );
     }
 

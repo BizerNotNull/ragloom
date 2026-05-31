@@ -97,14 +97,28 @@ impl FailedWorkJournal {
         guard.append(record)
     }
 
+    pub async fn append_exhausted(
+        &self,
+        work: WalRecord,
+        failure_kind: FailedWorkFailureKind,
+        terminal_reason: FailedWorkTerminalReason,
+        attempts: u32,
+    ) -> Result<u64, RagloomError> {
+        let mut guard = self.inner.lock().await;
+        let id = next_failed_work_id(&guard.read_all()?);
+        guard.append(FailedWorkRecord::Exhausted {
+            id,
+            work,
+            failure_kind,
+            terminal_reason,
+            attempts,
+        })?;
+        Ok(id)
+    }
+
     pub async fn read_all(&self) -> Result<Vec<FailedWorkRecord>, RagloomError> {
         let guard = self.inner.lock().await;
         guard.read_all()
-    }
-
-    pub async fn next_id(&self) -> Result<u64, RagloomError> {
-        let records = self.read_all().await?;
-        Ok(next_failed_work_id(&records))
     }
 }
 
@@ -309,23 +323,72 @@ pub fn failed_work_path_from_state_path(path: impl AsRef<Path>) -> PathBuf {
 }
 
 fn open_failed_work_append_file(path: &Path) -> Result<File, RagloomError> {
-    std::fs::OpenOptions::new()
-        .create(true)
+    match std::fs::OpenOptions::new()
+        .create_new(true)
         .append(true)
         .open(path)
-        .map_err(|e| {
-            RagloomError::new(RagloomErrorKind::State, e).with_context(format!(
+    {
+        Ok(file) => {
+            sync_failed_work_parent_dir(path)?;
+            Ok(file)
+        }
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| {
+                RagloomError::new(RagloomErrorKind::State, e).with_context(format!(
+                    "failed to open failed-work file: {}",
+                    path.display()
+                ))
+            }),
+        Err(err) => Err(
+            RagloomError::new(RagloomErrorKind::State, err).with_context(format!(
                 "failed to open failed-work file: {}",
                 path.display()
+            )),
+        ),
+    }
+}
+
+fn sync_failed_work_parent_dir(path: &Path) -> Result<(), RagloomError> {
+    #[cfg(unix)]
+    {
+        let parent = path.parent().ok_or_else(|| {
+            RagloomError::from_kind(RagloomErrorKind::State).with_context(format!(
+                "failed to sync failed-work parent directory: missing parent for {}",
+                path.display()
             ))
-        })
+        })?;
+        File::open(parent)
+            .map_err(|e| {
+                RagloomError::new(RagloomErrorKind::State, e).with_context(format!(
+                    "failed to open failed-work parent directory: {}",
+                    parent.display()
+                ))
+            })?
+            .sync_all()
+            .map_err(|e| {
+                RagloomError::new(RagloomErrorKind::State, e).with_context(format!(
+                    "failed to sync failed-work parent directory: {}",
+                    parent.display()
+                ))
+            })?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ids::FileFingerprint;
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, tempdir};
 
     fn sample_work(path: &str) -> WalRecord {
         WalRecord::WorkItemV2 {
@@ -454,5 +517,51 @@ mod tests {
             failed_work_path_from_state_path(".ragloom/wal.ndjson"),
             PathBuf::from(".ragloom").join("failed.ndjson")
         );
+    }
+
+    #[tokio::test]
+    async fn failed_work_journal_allocates_unique_ids_under_concurrency() {
+        let journal = FailedWorkJournal::new(InMemoryFailedWorkStore::new());
+        let mut tasks = Vec::new();
+
+        for idx in 0..8u64 {
+            let journal = journal.clone();
+            tasks.push(tokio::spawn(async move {
+                journal
+                    .append_exhausted(
+                        sample_work(&format!("/x/{idx}.txt")),
+                        FailedWorkFailureKind::Embed,
+                        FailedWorkTerminalReason::RetryExhausted,
+                        2,
+                    )
+                    .await
+                    .expect("append exhausted")
+            }));
+        }
+
+        let mut ids = Vec::new();
+        for task in tasks {
+            ids.push(task.await.expect("task join"));
+        }
+
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let pending = pending_failed_work(&journal.read_all().await.expect("read records"));
+        assert_eq!(pending.len(), 8);
+        assert_eq!(
+            pending.iter().map(|record| record.id).collect::<Vec<_>>(),
+            ids
+        );
+    }
+
+    #[test]
+    fn file_failed_work_open_creates_missing_file() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("failed.ndjson");
+
+        let store = FileFailedWorkStore::open(&path).expect("open new store");
+        assert!(path.exists());
+        assert!(store.is_empty());
     }
 }
