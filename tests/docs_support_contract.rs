@@ -68,3 +68,26 @@ fn changelog_records_v0_4_release_alignment() {
         "expected the changelog to record the v0.4 release docs alignment work"
     );
 }
+
+#[test]
+fn semantic_support_boundary_is_consistent_across_docs() {
+    let readme = read_repo_file("README.md");
+    let support = read_repo_file("SUPPORT.md");
+    let changelog = read_repo_file("CHANGELOG.md");
+
+    let support_phrase = "semantic chunking remains experimental and opt-in";
+    let fastembed_phrase = "`fastembed` remains a feature-gated semantic provider";
+
+    assert!(
+        readme.contains(support_phrase) && readme.contains(fastembed_phrase),
+        "expected README to describe the experimental semantic support boundary"
+    );
+    assert!(
+        support.contains(support_phrase) && support.contains(fastembed_phrase),
+        "expected SUPPORT.md to describe the experimental semantic support boundary"
+    );
+    assert!(
+        changelog.contains(support_phrase) && changelog.contains(fastembed_phrase),
+        "expected CHANGELOG.md to record the semantic support-boundary decision"
+    );
+}

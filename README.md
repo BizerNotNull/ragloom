@@ -51,7 +51,8 @@ Feature-gated paths:
 
 Experimental or best-effort paths:
 
-- semantic chunking remains opt-in and experimental
+- semantic chunking remains experimental and opt-in
+- `fastembed` remains a feature-gated semantic provider
 - macOS release artifacts remain best-effort convenience binaries rather than release-blocking targets
 
 Not supported yet:
@@ -534,8 +535,14 @@ Useful flags:
 - `--size-max`, `--size-min`, and `--size-overlap` tune boundaries
 - `--enable-semantic` enables semantic chunking in router mode
 - `--semantic-provider adapter|fastembed` selects the semantic signal source
+- `--semantic-percentile <1..=99>` tunes semantic split sensitivity when semantic chunking is active
 
-Semantic chunking is opt-in. `fastembed` requires building with `--features fastembed`.
+Semantic chunking remains experimental and opt-in. It is only active with
+`--enable-semantic` in router mode or with `--chunker-mode single --chunker-single semantic`.
+When active, `--semantic-provider` and `--semantic-percentile` apply to both router and
+single semantic modes. In router mode, semantic chunking replaces the Markdown and generic
+text fallback paths while code extensions continue to use the code chunker. `fastembed`
+remains a feature-gated semantic provider and requires building with `--features fastembed`.
 
 ## Indexed Payload
 

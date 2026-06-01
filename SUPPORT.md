@@ -89,11 +89,19 @@ support boundary:
 Feature-gated paths:
 
 - `fastembed` support is opt-in at build time and must keep passing its dedicated checks, but it is not the default shipped runtime path
+- `fastembed` remains a feature-gated semantic provider
 
 Experimental or best-effort paths:
 
 - semantic chunking remains experimental and opt-in even when the required provider path is available
+- semantic chunking remains experimental and opt-in
 - macOS release artifacts remain convenience builds rather than part of the formal support contract
+
+Semantic chunking is only active with `--enable-semantic` in router mode or with
+`--chunker-mode single --chunker-single semantic`. When active, `--semantic-provider`
+and `--semantic-percentile` are part of the experimental semantic surface in both modes.
+In router mode, semantic chunking replaces the Markdown and generic text fallback paths
+while code extensions continue to use the code chunker.
 
 Out of scope for the current support contract:
 
