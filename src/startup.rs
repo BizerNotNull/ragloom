@@ -6,6 +6,7 @@
 //! the library crate so it can be tested in its owning module.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::time::Duration;
 
 use crate::error::{RagloomError, RagloomErrorKind};
@@ -17,7 +18,7 @@ use crate::state::failed::{
 };
 use crate::state::wal::WalStore;
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum EmbedBackend {
     OpenAi {
         endpoint: String,
@@ -28,6 +29,26 @@ pub enum EmbedBackend {
         url: String,
         model: String,
     },
+}
+
+impl fmt::Debug for EmbedBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OpenAi {
+                endpoint, model, ..
+            } => f
+                .debug_struct("OpenAi")
+                .field("endpoint", endpoint)
+                .field("api_key", &"<redacted>")
+                .field("model", model)
+                .finish(),
+            Self::Http { url, model } => f
+                .debug_struct("Http")
+                .field("url", url)
+                .field("model", model)
+                .finish(),
+        }
+    }
 }
 
 impl EmbedBackend {
@@ -192,12 +213,15 @@ async fn bootstrap_collection_if_needed(
         })
 }
 
-fn chunker_selection(cfg: &RunConfig) -> String {
+fn chunker_selection(cfg: &RunConfig) -> Result<String, RagloomError> {
     match cfg.chunker_mode.as_str() {
         "router"
             if semantic_chunking_active(cfg.chunker_mode.as_str(), None, cfg.enable_semantic) =>
         {
-            format!("router+semantic(provider={})", cfg.semantic_provider)
+            Ok(format!(
+                "router+semantic(provider={})",
+                cfg.semantic_provider
+            ))
         }
         "single"
             if semantic_chunking_active(
@@ -206,14 +230,18 @@ fn chunker_selection(cfg: &RunConfig) -> String {
                 cfg.enable_semantic,
             ) =>
         {
-            format!("single:semantic(provider={})", cfg.semantic_provider)
+            Ok(format!(
+                "single:semantic(provider={})",
+                cfg.semantic_provider
+            ))
         }
-        "router" => "router".to_string(),
-        "single" => format!(
+        "router" => Ok("router".to_string()),
+        "single" => Ok(format!(
             "single:{}",
-            cfg.chunker_single.as_deref().unwrap_or("<missing>")
-        ),
-        _ => unreachable!("validated in parse_args"),
+            required_chunker_single(cfg.chunker_single.as_deref())?
+        )),
+        other => Err(RagloomError::from_kind(RagloomErrorKind::Config)
+            .with_context(format!("invalid chunker_mode: {other}"))),
     }
 }
 
@@ -265,6 +293,24 @@ fn bootstrap_plan(cfg: &RunConfig) -> Result<BootstrapPlan, RagloomError> {
         RagloomError::new(e.kind, e).with_context("failed to bootstrap Qdrant collection")
     })?;
     Ok(BootstrapPlan::WouldEnsureCollection { vector_size })
+}
+
+fn size_metric_from_config(
+    size_metric: &str,
+) -> Result<crate::transform::chunker::size::SizeMetric, RagloomError> {
+    match size_metric {
+        "chars" => Ok(crate::transform::chunker::size::SizeMetric::Chars),
+        "tokens" => Ok(crate::transform::chunker::size::SizeMetric::Tokens),
+        other => Err(RagloomError::from_kind(RagloomErrorKind::Config)
+            .with_context(format!("invalid size_metric: {other}"))),
+    }
+}
+
+fn required_chunker_single(chunker_single: Option<&str>) -> Result<&str, RagloomError> {
+    chunker_single.ok_or_else(|| {
+        RagloomError::from_kind(RagloomErrorKind::Config)
+            .with_context("chunker_mode=single requires chunker_single")
+    })
 }
 
 pub async fn prepare_startup(
@@ -325,11 +371,7 @@ pub async fn prepare_startup(
         "ragloom.chunker.tokenizer_selected"
     );
 
-    let metric = match cfg.size_metric.as_str() {
-        "chars" => crate::transform::chunker::size::SizeMetric::Chars,
-        "tokens" => crate::transform::chunker::size::SizeMetric::Tokens,
-        _ => unreachable!("validated in parse_args"),
-    };
+    let metric = size_metric_from_config(&cfg.size_metric)?;
 
     let rec_cfg = crate::transform::chunker::recursive::RecursiveConfig {
         metric,
@@ -374,7 +416,7 @@ pub async fn prepare_startup(
                 RagloomError::new(RagloomErrorKind::Config, e).with_context("invalid router config")
             })?),
             "single" => {
-                let kind = cfg.chunker_single.as_deref().unwrap();
+                let kind = required_chunker_single(cfg.chunker_single.as_deref())?;
                 match kind {
                     "semantic" => {
                         let signal =
@@ -416,7 +458,10 @@ pub async fn prepare_startup(
                     }
                 }
             }
-            _ => unreachable!("validated in parse_args"),
+            other => {
+                return Err(RagloomError::from_kind(RagloomErrorKind::Config)
+                    .with_context(format!("invalid chunker_mode: {other}")));
+            }
         }
     };
 
@@ -441,7 +486,7 @@ pub async fn validate_startup(cfg: &RunConfig) -> Result<StartupValidationSummar
         source_kind: cfg.source.kind().to_string(),
         source_target: cfg.source.log_target(),
         embed_backend: cfg.embed_backend.name().to_string(),
-        chunker_selection: chunker_selection(cfg),
+        chunker_selection: chunker_selection(cfg)?,
         bootstrap: bootstrap_plan(cfg)?,
     })
 }
@@ -705,6 +750,19 @@ mod tests {
         let err = validate_reloadable_changes(&current, &next).expect_err("should reject");
         assert_eq!(err.kind, RagloomErrorKind::Config);
         assert!(err.to_string().contains("health.addr"));
+    }
+
+    #[test]
+    fn embed_backend_debug_redacts_openai_api_key() {
+        let backend = EmbedBackend::OpenAi {
+            endpoint: "https://api.openai.com/v1/embeddings".to_string(),
+            api_key: "super-secret".to_string(),
+            model: "text-embedding-3-small".to_string(),
+        };
+
+        let rendered = format!("{backend:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("super-secret"));
     }
 
     #[test]
@@ -1136,7 +1194,10 @@ mod tests {
         cfg.chunker_single = Some("semantic".to_string());
         cfg.semantic_provider = "adapter".to_string();
 
-        assert_eq!(chunker_selection(&cfg), "single:semantic(provider=adapter)");
+        assert_eq!(
+            chunker_selection(&cfg).expect("chunker selection"),
+            "single:semantic(provider=adapter)"
+        );
     }
 
     #[test]
@@ -1145,7 +1206,54 @@ mod tests {
         cfg.enable_semantic = true;
         cfg.semantic_provider = "adapter".to_string();
 
-        assert_eq!(chunker_selection(&cfg), "router+semantic(provider=adapter)");
+        assert_eq!(
+            chunker_selection(&cfg).expect("chunker selection"),
+            "router+semantic(provider=adapter)"
+        );
+    }
+
+    #[test]
+    fn chunker_selection_rejects_single_mode_without_kind() {
+        let mut cfg = sample_run_config();
+        cfg.chunker_mode = "single".to_string();
+        cfg.chunker_single = None;
+
+        let err = chunker_selection(&cfg).expect_err("expected invalid config");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(
+            err.to_string()
+                .contains("chunker_mode=single requires chunker_single")
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_startup_rejects_invalid_size_metric_with_config_error() {
+        let mut cfg = sample_run_config();
+        cfg.size_metric = "bytes".to_string();
+
+        let err = match prepare_startup(&cfg, false).await {
+            Ok(_) => panic!("expected invalid config"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(err.to_string().contains("invalid size_metric: bytes"));
+    }
+
+    #[tokio::test]
+    async fn prepare_startup_rejects_single_mode_without_kind() {
+        let mut cfg = sample_run_config();
+        cfg.chunker_mode = "single".to_string();
+        cfg.chunker_single = None;
+
+        let err = match prepare_startup(&cfg, false).await {
+            Ok(_) => panic!("expected invalid config"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(
+            err.to_string()
+                .contains("chunker_mode=single requires chunker_single")
+        );
     }
 
     #[test]
