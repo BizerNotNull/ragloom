@@ -517,6 +517,22 @@ fn build_run_config(
         );
     }
 
+    let semantic_chunking_active = semantic_chunking_active(
+        chunker_mode.as_str(),
+        raw.chunker_single.as_deref(),
+        raw.enable_semantic,
+    );
+    if raw.semantic_provider.is_some() && !semantic_chunking_active {
+        return Err(cli_invalid_input(
+            "--semantic-provider requires semantic chunking to be active",
+        ));
+    }
+    if raw.semantic_percentile.is_some() && !semantic_chunking_active {
+        return Err(cli_invalid_input(
+            "--semantic-percentile requires semantic chunking to be active",
+        ));
+    }
+
     let semantic_provider = raw
         .semantic_provider
         .unwrap_or_else(|| "adapter".to_string());
@@ -928,8 +944,19 @@ impl StartupValidationSummary {
 
 fn chunker_selection(cfg: &RunConfig) -> String {
     match cfg.chunker_mode.as_str() {
-        "router" if cfg.enable_semantic => {
+        "router"
+            if semantic_chunking_active(cfg.chunker_mode.as_str(), None, cfg.enable_semantic) =>
+        {
             format!("router+semantic(provider={})", cfg.semantic_provider)
+        }
+        "single"
+            if semantic_chunking_active(
+                cfg.chunker_mode.as_str(),
+                cfg.chunker_single.as_deref(),
+                cfg.enable_semantic,
+            ) =>
+        {
+            format!("single:semantic(provider={})", cfg.semantic_provider)
         }
         "router" => "router".to_string(),
         "single" => format!(
@@ -938,6 +965,45 @@ fn chunker_selection(cfg: &RunConfig) -> String {
         ),
         _ => unreachable!("validated in parse_args"),
     }
+}
+
+fn semantic_chunking_active(
+    chunker_mode: &str,
+    chunker_single: Option<&str>,
+    enable_semantic: bool,
+) -> bool {
+    match chunker_mode {
+        "router" => enable_semantic,
+        "single" => chunker_single == Some("semantic"),
+        _ => false,
+    }
+}
+
+fn build_semantic_signal_provider(
+    cfg: &RunConfig,
+    embedding: &std::sync::Arc<dyn ragloom::embed::EmbeddingProvider + Send + Sync>,
+    embed_fingerprint: &str,
+) -> Result<std::sync::Arc<dyn ragloom::transform::chunker::SemanticSignalProvider>, RagloomError> {
+    use ragloom::transform::chunker::{EmbeddingProviderAdapter, SemanticSignalProvider};
+
+    let signal: std::sync::Arc<dyn SemanticSignalProvider> = match cfg.semantic_provider.as_str() {
+        "adapter" => std::sync::Arc::new(EmbeddingProviderAdapter::new(
+            std::sync::Arc::clone(embedding),
+            embed_fingerprint.to_string(),
+        )),
+        #[cfg(feature = "fastembed")]
+        "fastembed" => std::sync::Arc::new(
+            ragloom::transform::chunker::FastembedSignalProvider::new().map_err(|e| {
+                RagloomError::new(RagloomErrorKind::Config, e).with_context("fastembed init")
+            })?,
+        ),
+        other => {
+            return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput)
+                .with_context(format!("unsupported --semantic-provider: {other}")));
+        }
+    };
+
+    Ok(signal)
 }
 
 fn bootstrap_plan(cfg: &RunConfig) -> Result<BootstrapPlan, RagloomError> {
@@ -1059,31 +1125,17 @@ async fn prepare_startup(
     }
 
     use ragloom::transform::chunker::{
-        Chunker, EmbeddingProviderAdapter, MarkdownChunker, SemanticChunker,
-        SemanticSignalProvider, default_router, recursive::RecursiveChunker, semantic_router,
+        Chunker, MarkdownChunker, SemanticChunker, default_router, recursive::RecursiveChunker,
+        semantic_router,
     };
 
-    let chunker: std::sync::Arc<dyn Chunker> = if cfg.chunker_mode == "router"
-        && cfg.enable_semantic
+    let chunker: std::sync::Arc<dyn Chunker> = if semantic_chunking_active(
+        cfg.chunker_mode.as_str(),
+        cfg.chunker_single.as_deref(),
+        cfg.enable_semantic,
+    ) && cfg.chunker_mode == "router"
     {
-        let signal: std::sync::Arc<dyn SemanticSignalProvider> =
-            match cfg.semantic_provider.as_str() {
-                "adapter" => std::sync::Arc::new(EmbeddingProviderAdapter::new(
-                    std::sync::Arc::clone(&embedding),
-                    embed_fingerprint.clone(),
-                )),
-                #[cfg(feature = "fastembed")]
-                "fastembed" => std::sync::Arc::new(
-                    ragloom::transform::chunker::FastembedSignalProvider::new().map_err(|e| {
-                        RagloomError::new(RagloomErrorKind::Config, e)
-                            .with_context("fastembed init")
-                    })?,
-                ),
-                other => {
-                    return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput)
-                        .with_context(format!("unsupported --semantic-provider: {other}")));
-                }
-            };
+        let signal = build_semantic_signal_provider(cfg, &embedding, &embed_fingerprint)?;
         let semantic_chunker: std::sync::Arc<dyn Chunker> = std::sync::Arc::new(
             SemanticChunker::new(signal, rec_cfg, cfg.semantic_percentile).map_err(|e| {
                 RagloomError::new(RagloomErrorKind::Config, e)
@@ -1103,11 +1155,8 @@ async fn prepare_startup(
                 let kind = cfg.chunker_single.as_deref().unwrap();
                 match kind {
                     "semantic" => {
-                        let signal: std::sync::Arc<dyn SemanticSignalProvider> =
-                            std::sync::Arc::new(EmbeddingProviderAdapter::new(
-                                std::sync::Arc::clone(&embedding),
-                                embed_fingerprint.clone(),
-                            ));
+                        let signal =
+                            build_semantic_signal_provider(cfg, &embedding, &embed_fingerprint)?;
                         std::sync::Arc::new(
                             SemanticChunker::new(signal, rec_cfg, cfg.semantic_percentile)
                                 .map_err(|e| {
@@ -2639,6 +2688,102 @@ state:
     }
 
     #[test]
+    fn parse_args_rejects_semantic_provider_without_semantic_chunking() {
+        let args = vec![
+            "ragloom".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--embed-url".to_string(),
+            "http://embed".to_string(),
+            "--embed-model".to_string(),
+            "default".to_string(),
+            "--qdrant-url".to_string(),
+            "http://qdrant".to_string(),
+            "--collection".to_string(),
+            "docs".to_string(),
+            "--semantic-provider".to_string(),
+            "adapter".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("expected semantic provider to be rejected");
+        assert_eq!(err.kind, RagloomErrorKind::InvalidInput);
+        assert!(
+            err.to_string()
+                .contains("--semantic-provider requires semantic chunking to be active")
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_semantic_percentile_without_semantic_chunking() {
+        let args = vec![
+            "ragloom".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--embed-url".to_string(),
+            "http://embed".to_string(),
+            "--embed-model".to_string(),
+            "default".to_string(),
+            "--qdrant-url".to_string(),
+            "http://qdrant".to_string(),
+            "--collection".to_string(),
+            "docs".to_string(),
+            "--chunker-mode".to_string(),
+            "single".to_string(),
+            "--chunker-single".to_string(),
+            "recursive".to_string(),
+            "--semantic-percentile".to_string(),
+            "90".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("expected semantic percentile to be rejected");
+        assert_eq!(err.kind, RagloomErrorKind::InvalidInput);
+        assert!(
+            err.to_string()
+                .contains("--semantic-percentile requires semantic chunking to be active")
+        );
+    }
+
+    #[test]
+    fn parse_args_accepts_semantic_flags_for_single_semantic_mode() {
+        let args = vec![
+            "ragloom".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+            "--embed-backend".to_string(),
+            "http".to_string(),
+            "--embed-url".to_string(),
+            "http://embed".to_string(),
+            "--embed-model".to_string(),
+            "default".to_string(),
+            "--qdrant-url".to_string(),
+            "http://qdrant".to_string(),
+            "--collection".to_string(),
+            "docs".to_string(),
+            "--chunker-mode".to_string(),
+            "single".to_string(),
+            "--chunker-single".to_string(),
+            "semantic".to_string(),
+            "--semantic-provider".to_string(),
+            "adapter".to_string(),
+            "--semantic-percentile".to_string(),
+            "90".to_string(),
+        ];
+
+        let ParsedCommand::Run(cfg) = parse_args(&args).expect("config") else {
+            panic!("expected run command");
+        };
+
+        assert_eq!(cfg.chunker_mode, "single");
+        assert_eq!(cfg.chunker_single.as_deref(), Some("semantic"));
+        assert_eq!(cfg.semantic_provider, "adapter");
+        assert_eq!(cfg.semantic_percentile, 90);
+    }
+
+    #[test]
     fn parse_args_accepts_collection_vector_size_inline_value() {
         let args = vec![
             "ragloom".to_string(),
@@ -3222,6 +3367,25 @@ state:
         ];
         let err = parse_args(&args).expect_err("must reject");
         assert!(err.to_string().contains("--enable-semantic"));
+    }
+
+    #[test]
+    fn single_semantic_chunker_selection_includes_provider() {
+        let mut cfg = sample_run_config();
+        cfg.chunker_mode = "single".to_string();
+        cfg.chunker_single = Some("semantic".to_string());
+        cfg.semantic_provider = "adapter".to_string();
+
+        assert_eq!(chunker_selection(&cfg), "single:semantic(provider=adapter)");
+    }
+
+    #[test]
+    fn router_semantic_chunker_selection_includes_provider() {
+        let mut cfg = sample_run_config();
+        cfg.enable_semantic = true;
+        cfg.semantic_provider = "adapter".to_string();
+
+        assert_eq!(chunker_selection(&cfg), "router+semantic(provider=adapter)");
     }
 
     #[test]

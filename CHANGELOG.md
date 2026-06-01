@@ -13,6 +13,14 @@
 - Retry exhaustion no longer stops at logs and counters: worker terminal
   failures now persist a sanitized failure class plus the original scheduled
   work record, without recording secrets or full document contents.
+- Semantic chunking remains experimental and opt-in for `v0.4.1`, while
+  `--semantic-provider` and `--semantic-percentile` now only apply when the
+  semantic path is active in router or single-semantic mode.
+
+### Docs
+- Clarified that semantic chunking remains experimental and opt-in, and that
+  `fastembed` remains a feature-gated semantic provider for both router and
+  single-semantic mode.
 
 ## [0.4.0] - 2026-05-26
 
