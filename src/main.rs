@@ -523,12 +523,14 @@ fn build_run_config(
         raw.enable_semantic,
     );
     if raw.semantic_provider.is_some() && !semantic_chunking_active {
-        return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput)
-            .with_context("--semantic-provider requires semantic chunking to be active"));
+        return Err(cli_invalid_input(
+            "--semantic-provider requires semantic chunking to be active",
+        ));
     }
     if raw.semantic_percentile.is_some() && !semantic_chunking_active {
-        return Err(RagloomError::from_kind(RagloomErrorKind::InvalidInput)
-            .with_context("--semantic-percentile requires semantic chunking to be active"));
+        return Err(cli_invalid_input(
+            "--semantic-percentile requires semantic chunking to be active",
+        ));
     }
 
     let semantic_provider = raw
@@ -3375,6 +3377,15 @@ state:
         cfg.semantic_provider = "adapter".to_string();
 
         assert_eq!(chunker_selection(&cfg), "single:semantic(provider=adapter)");
+    }
+
+    #[test]
+    fn router_semantic_chunker_selection_includes_provider() {
+        let mut cfg = sample_run_config();
+        cfg.enable_semantic = true;
+        cfg.semantic_provider = "adapter".to_string();
+
+        assert_eq!(chunker_selection(&cfg), "router+semantic(provider=adapter)");
     }
 
     #[test]
