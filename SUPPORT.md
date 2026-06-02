@@ -25,7 +25,7 @@ Ragloom publishes artifacts through:
 
 Maintainers should start releases from `.github/workflows/release.yml` using
 `workflow_dispatch` with an explicit crate version from `Cargo.toml`
-(for example `0.4.0`).
+(for example `0.4.1`).
 
 The release workflow verifies that:
 
@@ -43,12 +43,12 @@ published notes come from the repository event history rather than ad hoc local
 release text.
 
 GitHub Release archives are published with explicit target names such as
-`ragloom-v0.4.0-x86_64-unknown-linux-gnu.tar.gz` and
-`ragloom-v0.4.0-x86_64-pc-windows-msvc.zip`.
+`ragloom-v0.4.1-x86_64-unknown-linux-gnu.tar.gz` and
+`ragloom-v0.4.1-x86_64-pc-windows-msvc.zip`.
 
-Each published archive also includes a matching `.sha256.txt` checksum file and
-`.spdx.json` SBOM. Release checksums are generated with a platform-aware
-command so Linux targets use `sha256sum` while macOS targets use `shasum -a 256`.
+Each published archive also includes a matching `.sha256.txt` checksum file.
+Release checksums are generated with a platform-aware command so Linux targets
+use `sha256sum` while macOS targets use `shasum -a 256`.
 
 ## v0.4 Support Readiness
 
