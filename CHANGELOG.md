@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-02
+
 ### Added
 - Persistent local failed-work journal at `failed.ndjson` beside the WAL so
   exhausted or terminal ingest work can be inspected and operator-replayed
@@ -16,11 +18,16 @@
 - Semantic chunking remains experimental and opt-in for `v0.4.1`, while
   `--semantic-provider` and `--semantic-percentile` now only apply when the
   semantic path is active in router or single-semantic mode.
+- GitHub Release publication now uploads only the packaged archives plus their
+  `.sha256.txt` verification files, and filters out unrelated workflow
+  artifacts such as coverage outputs.
 
 ### Docs
 - Clarified that semantic chunking remains experimental and opt-in, and that
   `fastembed` remains a feature-gated semantic provider for both router and
   single-semantic mode.
+- Aligned the installation and support docs with the slimmer release-asset set
+  and the `v0.4.1` archive examples.
 
 ## [0.4.0] - 2026-05-26
 

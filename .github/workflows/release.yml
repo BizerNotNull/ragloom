@@ -136,14 +136,6 @@ jobs:
             -Path "dist/${{ matrix.target }}/${{ matrix.binary_name }}" `
             -DestinationPath "dist/$archiveBasename.zip"
 
-      - name: Generate SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
-        with:
-          path: dist/${{ matrix.target }}
-          output-file: ragloom-${{ needs.prepare-release.outputs.tag }}-${{ matrix.target }}.spdx.json
-          upload-artifact: false
-          upload-release-assets: false
-
       - name: Generate checksums
         shell: bash
         env:
@@ -165,7 +157,6 @@ jobs:
           path: |
             dist/ragloom-${{ needs.prepare-release.outputs.tag }}-${{ matrix.target }}.${{ matrix.archive_extension }}
             dist/ragloom-${{ needs.prepare-release.outputs.tag }}-${{ matrix.target }}.sha256.txt
-            ragloom-${{ needs.prepare-release.outputs.tag }}-${{ matrix.target }}.spdx.json
 
   release-binaries-best-effort:
     name: release-binaries-best-effort (${{ matrix.target }})
@@ -220,14 +211,6 @@ jobs:
           archive_basename="ragloom-${RELEASE_TAG}-${{ matrix.target }}"
           tar -C "dist/${{ matrix.target }}" -czf "dist/${archive_basename}.tar.gz" "${{ matrix.binary_name }}"
 
-      - name: Generate SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
-        with:
-          path: dist/${{ matrix.target }}
-          output-file: ragloom-${{ needs.prepare-release.outputs.tag }}-${{ matrix.target }}.spdx.json
-          upload-artifact: false
-          upload-release-assets: false
-
       - name: Generate checksums
         shell: bash
         env:
@@ -249,7 +232,6 @@ jobs:
           path: |
             dist/ragloom-${{ needs.prepare-release.outputs.tag }}-${{ matrix.target }}.${{ matrix.archive_extension }}
             dist/ragloom-${{ needs.prepare-release.outputs.tag }}-${{ matrix.target }}.sha256.txt
-            ragloom-${{ needs.prepare-release.outputs.tag }}-${{ matrix.target }}.spdx.json
 
   publish-release:
     name: publish-release
@@ -292,7 +274,9 @@ jobs:
       - name: Download release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
+          pattern: release-*
           path: release-artifacts
+          merge-multiple: true
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2

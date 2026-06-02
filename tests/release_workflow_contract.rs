@@ -348,10 +348,8 @@ fn release_workflow_packages_named_assets_and_keeps_macos_best_effort() {
         "expected release workflow to package Windows assets as zip archives"
     );
     assert!(
-        supported_job_yaml.matches("upload-artifact: false").count() == 1
-            && best_effort_yaml.matches("upload-artifact: false").count() == 1
-            && !workflow_yaml.contains("upload-release-assets: true"),
-        "expected SBOM generation to avoid duplicate artifact uploads and let the explicit release artifact step own publication"
+        !workflow_yaml.contains("anchore/sbom-action") && !workflow_yaml.contains(".spdx.json"),
+        "expected the release workflow to avoid publishing low-value SBOM sidecar assets"
     );
     assert!(
         supported_job_yaml.contains("x86_64-unknown-linux-gnu")
@@ -368,6 +366,12 @@ fn release_workflow_packages_named_assets_and_keeps_macos_best_effort() {
             && best_effort_yaml.contains("aarch64-apple-darwin")
             && best_effort_yaml.contains("continue-on-error: true"),
         "expected macOS artifacts to remain best-effort and non-blocking"
+    );
+    assert!(
+        publish_release_yaml.contains("pattern: release-*")
+            && publish_release_yaml.contains("merge-multiple: true")
+            && !publish_release_yaml.contains("name: lcov"),
+        "expected publish-release to download only named release artifacts instead of unrelated workflow artifacts"
     );
     assert!(
         !publish_release_yaml.contains("release-binaries-best-effort"),
