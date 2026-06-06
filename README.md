@@ -461,6 +461,33 @@ Replay is intentionally at-least-once: if a prior replay appended work into the
 WAL but crashed before marking the failed record requeued, rerunning
 `replay-failed` may append that work again rather than silently losing it.
 
+To compact both journals without changing replay semantics, run:
+
+```bash
+ragloom compact-state --state-path .ragloom/wal.ndjson
+```
+
+Or reuse YAML state configuration:
+
+```bash
+ragloom compact-state --config ./ragloom.yaml
+```
+
+`compact-state` is an explicit operator command. Ragloom does not compact state
+implicitly during normal ingest. The command rewrites `wal.ndjson` and
+`failed.ndjson` to the minimum records needed to preserve startup replay,
+planner de-duplication, delete synchronization, pending failed work, and
+`replay-failed` behavior.
+
+Compaction writes a same-directory temporary file, flushes it with
+`sync_data()`, and only then replaces the original journal. On Linux and other
+Unix targets, Ragloom uses same-directory rename plus parent-directory sync. On
+Windows, Ragloom uses the native file-replacement primitive so compaction can
+replace an existing journal without first deleting it. If validation, writing,
+or replacement fails, the original readable journal remains the safety
+boundary and Ragloom returns a `state` error instead of silently discarding
+records.
+
 ## Architecture
 
 ```text

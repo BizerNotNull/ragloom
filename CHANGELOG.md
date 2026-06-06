@@ -5,6 +5,18 @@
 ## [0.4.1] - 2026-06-02
 
 ### Added
+- Explicit `ragloom compact-state` command to crash-safely compact
+  `wal.ndjson` and `failed.ndjson` without changing startup replay,
+  planner de-duplication, delete-sync behavior, or failed-work replay
+  semantics.
+
+### Docs
+- Documented the state-compaction safety boundary, including Linux/Unix
+  rename-plus-directory-sync behavior and Windows native file replacement.
+
+## [0.4.1] - 2026-06-02
+
+### Added
 - Persistent local failed-work journal at `failed.ndjson` beside the WAL so
   exhausted or terminal ingest work can be inspected and operator-replayed
   without changing WAL acknowledgement or startup replay semantics.
