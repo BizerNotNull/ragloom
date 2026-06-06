@@ -240,7 +240,7 @@ fn replace_file_with_temp(path: &Path, temp_path: &Path, label: &str) -> Result<
                 path.display()
             ))
         })?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(windows)]
