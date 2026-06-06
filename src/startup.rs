@@ -12,6 +12,7 @@ use std::time::Duration;
 use crate::error::{RagloomError, RagloomErrorKind};
 use crate::sink::qdrant::{QdrantConfig, QdrantSink};
 use crate::source::runtime::{RunSource, prepare_source_runtime};
+use crate::state::compact::{StateCompactionSummary, compact_state_files};
 use crate::state::failed::{
     FailedWorkRecord, FailedWorkStore, FileFailedWorkStore, failed_work_path_from_state_path,
     pending_failed_work,
@@ -89,6 +90,11 @@ pub struct RunConfig {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ReplayFailedConfig {
+    pub state_path: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CompactStateConfig {
     pub state_path: String,
 }
 
@@ -612,6 +618,13 @@ pub async fn replay_failed_command(cfg: &ReplayFailedConfig) -> Result<usize, Ra
         .map_err(|e| e.with_context("failed to initialize failed-work store"))?;
 
     replay_failed_into_wal(&mut wal, &mut failed_store)
+}
+
+pub async fn compact_state_command(
+    cfg: &CompactStateConfig,
+) -> Result<StateCompactionSummary, RagloomError> {
+    let failed_path = failed_work_path_from_state_path(&cfg.state_path);
+    compact_state_files(std::path::Path::new(&cfg.state_path), &failed_path)
 }
 
 #[cfg(test)]
@@ -1356,6 +1369,150 @@ mod tests {
         let replayed = replay_failed_into_wal(&mut wal, &mut failed).expect("replay");
         assert_eq!(replayed, 1);
         assert_eq!(wal.read_all().expect("read wal"), vec![work.clone(), work]);
+    }
+
+    #[tokio::test]
+    async fn compact_state_command_preserves_observable_replay_state() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let wal_path = dir.path().join("wal.ndjson");
+        let failed_path = dir.path().join("failed.ndjson");
+
+        let mut wal = crate::state::wal::FileWal::open(&wal_path).expect("open wal");
+        let a_v1 = crate::ids::FileFingerprint {
+            canonical_path: "/x/a.txt".to_string(),
+            size_bytes: 10,
+            mtime_unix_secs: 100,
+            etag: None,
+        };
+        let a_v2 = crate::ids::FileFingerprint {
+            canonical_path: "/x/a.txt".to_string(),
+            size_bytes: 11,
+            mtime_unix_secs: 101,
+            etag: None,
+        };
+        let b_v1 = crate::ids::FileFingerprint {
+            canonical_path: "/x/b.txt".to_string(),
+            size_bytes: 20,
+            mtime_unix_secs: 200,
+            etag: None,
+        };
+        wal.append(crate::state::wal::WalRecord::WorkItemV2 {
+            fingerprint: a_v1.clone(),
+        })
+        .expect("append work");
+        wal.append(crate::state::wal::WalRecord::SinkAckV2 {
+            fingerprint: a_v1.clone(),
+        })
+        .expect("append ack");
+        wal.append(crate::state::wal::WalRecord::WorkItemV2 {
+            fingerprint: a_v2.clone(),
+        })
+        .expect("append pending work");
+        wal.append(crate::state::wal::WalRecord::WorkItemV2 {
+            fingerprint: b_v1.clone(),
+        })
+        .expect("append b work");
+        wal.append(crate::state::wal::WalRecord::SinkAckV2 {
+            fingerprint: b_v1.clone(),
+        })
+        .expect("append b ack");
+        wal.append(crate::state::wal::WalRecord::DeleteDocument {
+            canonical_path: "/x/c.txt".to_string(),
+        })
+        .expect("append delete");
+
+        let mut failed = FileFailedWorkStore::open(&failed_path).expect("open failed");
+        failed
+            .append(FailedWorkRecord::Exhausted {
+                id: 1,
+                work: crate::state::wal::WalRecord::DeleteDocument {
+                    canonical_path: "/x/c.txt".to_string(),
+                },
+                failure_kind: crate::state::failed::FailedWorkFailureKind::Sink,
+                terminal_reason: crate::state::failed::FailedWorkTerminalReason::RetryExhausted,
+                attempts: 3,
+            })
+            .expect("append failed exhausted");
+        failed
+            .append(FailedWorkRecord::Requeued { exhausted_id: 1 })
+            .expect("append requeued");
+        failed
+            .append(FailedWorkRecord::Exhausted {
+                id: 2,
+                work: crate::state::wal::WalRecord::WorkItemV2 {
+                    fingerprint: a_v2.clone(),
+                },
+                failure_kind: crate::state::failed::FailedWorkFailureKind::Embed,
+                terminal_reason: crate::state::failed::FailedWorkTerminalReason::NonRetryable,
+                attempts: 1,
+            })
+            .expect("append pending failed exhausted");
+
+        let wal_before = crate::state::wal::FileWal::open(&wal_path)
+            .expect("reopen wal")
+            .read_all()
+            .expect("read wal before");
+        let failed_before = FileFailedWorkStore::open(&failed_path)
+            .expect("reopen failed")
+            .read_all()
+            .expect("read failed before");
+
+        let summary = compact_state_command(&CompactStateConfig {
+            state_path: wal_path.to_string_lossy().to_string(),
+        })
+        .await
+        .expect("compact state");
+
+        assert!(summary.wal.records_after <= summary.wal.records_before);
+        assert!(summary.failed_work.records_after <= summary.failed_work.records_before);
+
+        let wal_after = crate::state::wal::FileWal::open(&wal_path)
+            .expect("reopen wal after")
+            .read_all()
+            .expect("read wal after");
+        let failed_after = FileFailedWorkStore::open(&failed_path)
+            .expect("reopen failed after")
+            .read_all()
+            .expect("read failed after");
+
+        assert_eq!(
+            crate::state::wal::unacked_work_items(&wal_after),
+            crate::state::wal::unacked_work_items(&wal_before)
+        );
+        assert_eq!(
+            crate::state::wal::known_live_document_paths(&wal_after),
+            crate::state::wal::known_live_document_paths(&wal_before)
+        );
+        assert_eq!(
+            crate::state::failed::pending_failed_work(&failed_after),
+            crate::state::failed::pending_failed_work(&failed_before)
+        );
+        assert_eq!(
+            crate::state::failed::next_failed_work_id(&failed_after),
+            crate::state::failed::next_failed_work_id(&failed_before)
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_state_command_fails_on_malformed_wal_without_replacing_original() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let wal_path = dir.path().join("wal.ndjson");
+        std::fs::write(&wal_path, "{not json}\n").expect("write malformed wal");
+
+        let err = compact_state_command(&CompactStateConfig {
+            state_path: wal_path.to_string_lossy().to_string(),
+        })
+        .await
+        .expect_err("malformed wal should fail");
+
+        assert!(
+            err.to_string()
+                .contains("failed to initialize persistent WAL")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&wal_path).expect("read original wal"),
+            "{not json}\n"
+        );
     }
 
     #[test]

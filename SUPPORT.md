@@ -75,6 +75,13 @@ macOS binaries are provided as convenience artifacts. They should compile and pu
 When a macOS build succeeds, its archive is appended to the existing GitHub
 Release after the supported Linux and Windows assets have already published.
 
+State-journal compaction is part of that Linux and Windows support boundary.
+On Unix targets, compaction uses same-directory rename plus parent-directory
+sync after writing and syncing the temporary file. On Windows, compaction uses
+the native replacement primitive for existing files. If replacement fails, the
+original journal is the durability boundary and the command returns a `state`
+error instead of dropping records.
+
 ## Feature Boundaries
 
 Core support boundary maintainers are hardening for the current `v0.4`

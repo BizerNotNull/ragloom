@@ -18,15 +18,16 @@ use ragloom::pipeline::runtime::{
 };
 use ragloom::source::runtime::{prepare_source_runtime, resolve_run_source};
 use ragloom::startup::{
-    EmbedBackend, PreparedStartup, ReplayFailedConfig, RunConfig, prepare_startup,
-    replay_failed_command, validate_reloadable_changes, validate_startup,
+    CompactStateConfig, EmbedBackend, PreparedStartup, ReplayFailedConfig, RunConfig,
+    compact_state_command, prepare_startup, replay_failed_command, validate_reloadable_changes,
+    validate_startup,
 };
 use ragloom::state::failed::{
     FailedWorkJournal, FileFailedWorkStore, failed_work_path_from_state_path,
 };
 
 const CONFIG_RELOAD_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const CLI_USAGE: &str = "usage: ragloom [check|dry-run|replay-failed] [--config <path>] [--source-kind <filesystem|s3>] [--dir <path>] [--s3-bucket <name>] [--s3-prefix <prefix>] --qdrant-url <url> --collection <name> [--state-path <path>] [--health-addr <host:port>] [--retry-max-attempts <n>] [--embed-backend <openai|http>] (omit command to run ingestion)";
+const CLI_USAGE: &str = "usage: ragloom [check|dry-run|replay-failed|compact-state] [--config <path>] [--source-kind <filesystem|s3>] [--dir <path>] [--s3-bucket <name>] [--s3-prefix <prefix>] --qdrant-url <url> --collection <name> [--state-path <path>] [--health-addr <host:port>] [--retry-max-attempts <n>] [--embed-backend <openai|http>] (omit command to run ingestion)";
 
 /// Top-level CLI command selected by argument parsing.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -37,6 +38,7 @@ pub enum ParsedCommand {
     Check(Box<RunConfig>),
     DryRun(Box<RunConfig>),
     ReplayFailed(ReplayFailedConfig),
+    CompactState(CompactStateConfig),
     Help,
     Version,
 }
@@ -82,6 +84,7 @@ enum RawParsedCommand {
     Check(Box<RawCliArgs>),
     DryRun(Box<RawCliArgs>),
     ReplayFailed(Box<RawCliArgs>),
+    CompactState(Box<RawCliArgs>),
     Help,
     Version,
 }
@@ -120,6 +123,9 @@ pub fn parse_args(args: &[String]) -> Result<ParsedCommand, RagloomError> {
         RawParsedCommand::ReplayFailed(raw) => Ok(ParsedCommand::ReplayFailed(
             build_replay_failed_config(*raw)?,
         )),
+        RawParsedCommand::CompactState(raw) => Ok(ParsedCommand::CompactState(
+            build_compact_state_config(*raw)?,
+        )),
         RawParsedCommand::Run(raw) => {
             let file_config = raw
                 .config_path
@@ -143,7 +149,10 @@ fn parse_reload_run_config_from_contents(
         RawParsedCommand::Run(raw)
         | RawParsedCommand::Check(raw)
         | RawParsedCommand::DryRun(raw) => *raw,
-        RawParsedCommand::ReplayFailed(_) | RawParsedCommand::Help | RawParsedCommand::Version => {
+        RawParsedCommand::ReplayFailed(_)
+        | RawParsedCommand::CompactState(_)
+        | RawParsedCommand::Help
+        | RawParsedCommand::Version => {
             return Err(
                 RagloomError::from_kind(RagloomErrorKind::Config).with_context(format!(
                     "config reload expected runtime command for {}",
@@ -168,9 +177,10 @@ fn parse_raw_cli_args(args: &[String]) -> Result<RawParsedCommand, RagloomError>
             "check" => "check",
             "dry-run" => "dry-run",
             "replay-failed" => "replay-failed",
+            "compact-state" => "compact-state",
             other => {
                 return Err(cli_invalid_input(format!(
-                    "unknown command: {other} (expected: check|dry-run|replay-failed, or omit command to run ingestion)"
+                    "unknown command: {other} (expected: check|dry-run|replay-failed|compact-state, or omit command to run ingestion)"
                 )));
             }
         };
@@ -254,6 +264,7 @@ fn parse_raw_cli_args(args: &[String]) -> Result<RawParsedCommand, RagloomError>
         "check" => RawParsedCommand::Check(Box::new(raw)),
         "dry-run" => RawParsedCommand::DryRun(Box::new(raw)),
         "replay-failed" => RawParsedCommand::ReplayFailed(Box::new(raw)),
+        "compact-state" => RawParsedCommand::CompactState(Box::new(raw)),
         _ => unreachable!("validated command"),
     })
 }
@@ -647,7 +658,50 @@ fn build_replay_failed_config(raw: RawCliArgs) -> Result<ReplayFailedConfig, Rag
     Ok(ReplayFailedConfig { state_path })
 }
 
+fn build_compact_state_config(raw: RawCliArgs) -> Result<CompactStateConfig, RagloomError> {
+    ensure_compact_state_flags_supported(&raw)?;
+
+    if raw.state_path.is_none() && raw.config_path.is_none() {
+        return Err(cli_config_error(
+            "compact-state requires --state-path or --config",
+        ));
+    }
+
+    let config_provided = raw.config_path.is_some();
+    let file_state_path = raw
+        .config_path
+        .as_deref()
+        .map(load_replay_failed_file_config)
+        .transpose()?
+        .and_then(|cfg| cfg.state.map(|state| state.path));
+
+    if raw.state_path.is_none() && config_provided && file_state_path.is_none() {
+        return Err(cli_config_error(
+            "compact-state requires state.path in --config or an explicit --state-path",
+        ));
+    }
+
+    let state_path = raw
+        .state_path
+        .or(file_state_path)
+        .ok_or_else(|| cli_config_error("compact-state requires --state-path or --config"))?;
+
+    if state_path.trim().is_empty() {
+        return Err(cli_config_error("--state-path or state.path is empty"));
+    }
+
+    Ok(CompactStateConfig { state_path })
+}
+
 fn ensure_replay_failed_flags_supported(raw: &RawCliArgs) -> Result<(), RagloomError> {
+    ensure_state_only_flags_supported(raw, "replay-failed")
+}
+
+fn ensure_compact_state_flags_supported(raw: &RawCliArgs) -> Result<(), RagloomError> {
+    ensure_state_only_flags_supported(raw, "compact-state")
+}
+
+fn ensure_state_only_flags_supported(raw: &RawCliArgs, command: &str) -> Result<(), RagloomError> {
     let unsupported = [
         raw.source_kind.as_ref().map(|_| "--source-kind"),
         raw.dir.as_ref().map(|_| "--dir"),
@@ -695,19 +749,19 @@ fn ensure_replay_failed_flags_supported(raw: &RawCliArgs) -> Result<(), RagloomE
     .next();
 
     if raw.create_collection_if_missing {
-        return Err(cli_invalid_input(
-            "replay-failed only accepts --config and --state-path",
-        ));
+        return Err(cli_invalid_input(format!(
+            "{command} only accepts --config and --state-path"
+        )));
     }
     if raw.enable_semantic {
-        return Err(cli_invalid_input(
-            "replay-failed only accepts --config and --state-path",
-        ));
+        return Err(cli_invalid_input(format!(
+            "{command} only accepts --config and --state-path"
+        )));
     }
     if unsupported.is_some() {
-        return Err(cli_invalid_input(
-            "replay-failed only accepts --config and --state-path",
-        ));
+        return Err(cli_invalid_input(format!(
+            "{command} only accepts --config and --state-path"
+        )));
     }
 
     Ok(())
@@ -855,6 +909,21 @@ async fn try_main() -> Result<(), RagloomError> {
         ParsedCommand::ReplayFailed(cfg) => {
             let replayed = replay_failed_command(&cfg).await?;
             println!("ragloom replay-failed requeued {replayed} work items");
+            return Ok(());
+        }
+        ParsedCommand::CompactState(cfg) => {
+            let summary = compact_state_command(&cfg).await?;
+            println!(
+                "ragloom compact-state wal records {} -> {}, bytes {} -> {}; failed-work records {} -> {}, bytes {} -> {}",
+                summary.wal.records_before,
+                summary.wal.records_after,
+                summary.wal.bytes_before,
+                summary.wal.bytes_after,
+                summary.failed_work.records_before,
+                summary.failed_work.records_after,
+                summary.failed_work.bytes_before,
+                summary.failed_work.bytes_after
+            );
             return Ok(());
         }
         ParsedCommand::Run(cfg) => *cfg,
@@ -1718,6 +1787,24 @@ sink:
     }
 
     #[test]
+    fn parse_args_returns_compact_state_command() {
+        let args = vec![
+            "ragloom".to_string(),
+            "compact-state".to_string(),
+            "--state-path".to_string(),
+            ".state/ragloom.ndjson".to_string(),
+        ];
+
+        let cmd = parse_args(&args).expect("compact-state command");
+        assert_eq!(
+            cmd,
+            ParsedCommand::CompactState(CompactStateConfig {
+                state_path: ".state/ragloom.ndjson".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn parse_args_replay_failed_reads_state_path_from_config_only() {
         let mut file = NamedTempFile::new().expect("temp file");
         file.write_all(
@@ -1783,6 +1870,22 @@ state:
     }
 
     #[test]
+    fn parse_args_compact_state_rejects_runtime_flags() {
+        let args = vec![
+            "ragloom".to_string(),
+            "compact-state".to_string(),
+            "--state-path".to_string(),
+            ".state/ragloom.ndjson".to_string(),
+            "--dir".to_string(),
+            "/tmp/docs".to_string(),
+        ];
+
+        let err = parse_args(&args).expect_err("must reject runtime flags");
+        assert_eq!(err.kind, RagloomErrorKind::InvalidInput);
+        assert!(err.to_string().contains("compact-state only accepts"));
+    }
+
+    #[test]
     fn parse_args_replay_failed_requires_state_path_or_config() {
         let args = vec!["ragloom".to_string(), "replay-failed".to_string()];
 
@@ -1791,6 +1894,18 @@ state:
         assert!(
             err.to_string()
                 .contains("replay-failed requires --state-path or --config")
+        );
+    }
+
+    #[test]
+    fn parse_args_compact_state_requires_state_path_or_config() {
+        let args = vec!["ragloom".to_string(), "compact-state".to_string()];
+
+        let err = parse_args(&args).expect_err("missing state-path or config");
+        assert_eq!(err.kind, RagloomErrorKind::Config);
+        assert!(
+            err.to_string()
+                .contains("compact-state requires --state-path or --config")
         );
     }
 
