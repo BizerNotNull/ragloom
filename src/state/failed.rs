@@ -3,6 +3,10 @@
 //! # Why
 //! Exhausted work should be inspectable and operator-replayable without
 //! changing the WAL's acknowledgement/replay semantics.
+//!
+//! The journal shares the WAL's fail-closed compatibility posture: released
+//! `v0.4.1+` newline-delimited JSON records remain directly readable, while
+//! unknown future variants or malformed lines fail with `state` context.
 
 use std::fs::File;
 use std::io::{ErrorKind, Write};

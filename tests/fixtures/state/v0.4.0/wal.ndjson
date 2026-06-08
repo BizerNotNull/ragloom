@@ -1,0 +1,9 @@
+{"type":"work_item_v2","fingerprint":{"canonical_path":"/docs/acked.md","size_bytes":100,"mtime_unix_secs":1710000000,"etag":null}}
+{"type":"sink_ack_v2","fingerprint":{"canonical_path":"/docs/acked.md","size_bytes":100,"mtime_unix_secs":1710000000,"etag":null}}
+{"type":"work_item_v2","fingerprint":{"canonical_path":"/docs/pending.md","size_bytes":120,"mtime_unix_secs":1710000100,"etag":null}}
+{"type":"work_item","chunk_id":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]}
+{"type":"work_item","chunk_id":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3]}
+{"type":"sink_ack","chunk_id":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3]}
+{"type":"delete_document","canonical_path":"/docs/deleted.md"}
+{"type":"delete_ack","canonical_path":"/docs/deleted.md"}
+{"type":"delete_document","canonical_path":"/docs/pending-delete.md"}

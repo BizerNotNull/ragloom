@@ -91,3 +91,36 @@ fn semantic_support_boundary_is_consistent_across_docs() {
         "expected CHANGELOG.md to record the semantic support-boundary decision"
     );
 }
+
+#[test]
+fn state_compatibility_contract_is_consistent_across_docs() {
+    let readme = read_repo_file("README.md");
+    let support = read_repo_file("SUPPORT.md");
+    let changelog = read_repo_file("CHANGELOG.md");
+
+    let readme_direct_read_phrase = "directly reads the supported released `v0.4.x` WAL format";
+    let support_direct_read_phrase = "directly reads supported released `v0.4.x` WAL state";
+    let min_version_phrase = "v0.4.0";
+    let fail_closed_phrase = "truncated final writes";
+
+    assert!(
+        readme.contains("State compatibility contract")
+            && readme.contains(readme_direct_read_phrase)
+            && readme.contains(min_version_phrase)
+            && readme.contains(fail_closed_phrase),
+        "expected README to define the v0.5 state compatibility contract"
+    );
+    assert!(
+        support.contains("on-disk state compatibility contract")
+            && support.contains(support_direct_read_phrase)
+            && support.contains(min_version_phrase)
+            && support.contains(fail_closed_phrase),
+        "expected SUPPORT.md to treat the state compatibility contract as supported surface"
+    );
+    assert!(
+        changelog.contains("on-disk compatibility contract")
+            && changelog.contains(min_version_phrase)
+            && changelog.contains(fail_closed_phrase),
+        "expected CHANGELOG.md to record the state compatibility contract work"
+    );
+}
