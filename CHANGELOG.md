@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added
+- Checked-in `v0.4.0` and `v0.4.1` state fixtures plus compatibility contract
+  tests that open, replay, compact, and re-open supported `wal.ndjson` and
+  `failed.ndjson` shapes under the current implementation.
+
+### Changed
+- Defined the `v0.5.0` on-disk compatibility contract as direct readability of
+  supported released `v0.4.x` WAL state, with `v0.4.0` as the minimum
+  supported WAL version and `failed.ndjson` support applying from `v0.4.1+`.
+- Kept state compatibility fail-closed: unknown future records, malformed
+  lines, truncated final writes, and unsupported state shapes now have
+  explicit contract coverage and remain startup errors instead of best-effort
+  recovery cases.
+
+### Docs
+- Documented the state upgrade contract consistently across `README.md`,
+  `SUPPORT.md`, and `CHANGELOG.md`, including the minimum supported state
+  version and the requirement for explicit migration notes before any future
+  incompatible state change.
+
 ## [0.4.1] - 2026-06-02
 
 ### Added
@@ -9,14 +29,6 @@
   `wal.ndjson` and `failed.ndjson` without changing startup replay,
   planner de-duplication, delete-sync behavior, or failed-work replay
   semantics.
-
-### Docs
-- Documented the state-compaction safety boundary, including Linux/Unix
-  rename-plus-directory-sync behavior and Windows native file replacement.
-
-## [0.4.1] - 2026-06-02
-
-### Added
 - Persistent local failed-work journal at `failed.ndjson` beside the WAL so
   exhausted or terminal ingest work can be inspected and operator-replayed
   without changing WAL acknowledgement or startup replay semantics.
@@ -35,6 +47,8 @@
   artifacts such as coverage outputs.
 
 ### Docs
+- Documented the state-compaction safety boundary, including Linux/Unix
+  rename-plus-directory-sync behavior and Windows native file replacement.
 - Clarified that semantic chunking remains experimental and opt-in, and that
   `fastembed` remains a feature-gated semantic provider for both router and
   single-semantic mode.

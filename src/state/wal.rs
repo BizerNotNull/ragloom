@@ -4,6 +4,11 @@
 //! We rely on at-least-once execution with deterministic IDs. A minimal WAL lets
 //! us replay un-acked work after crashes without requiring complex distributed
 //! coordination.
+//!
+//! The on-disk contract is intentionally small and fail-closed: released
+//! `v0.4.x` newline-delimited JSON records stay directly readable, while
+//! unknown future variants or malformed lines fail with `state` context rather
+//! than being skipped.
 
 use std::fs::File;
 use std::io::{ErrorKind, Write};
@@ -112,6 +117,8 @@ impl WalStore for InMemoryWal {
 /// # Why
 /// A line-oriented JSON format stays inspectable, append-only, and deterministic
 /// while being enough to replay work/ack boundaries after a local restart.
+/// Ragloom treats the file as durable user-owned state and validates every line
+/// on open so unsupported or corrupted records fail before startup replay.
 #[derive(Debug)]
 pub struct FileWal {
     path: PathBuf,

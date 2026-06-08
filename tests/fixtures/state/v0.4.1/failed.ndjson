@@ -1,0 +1,4 @@
+{"type":"exhausted","id":1,"work":{"type":"work_item_v2","fingerprint":{"canonical_path":"/docs/already-requeued.md","size_bytes":90,"mtime_unix_secs":1710000300,"etag":null}},"failure_kind":"embed","terminal_reason":"retry_exhausted","attempts":3}
+{"type":"requeued","exhausted_id":1}
+{"type":"exhausted","id":2,"work":{"type":"delete_document","canonical_path":"/docs/retry-delete.md"},"failure_kind":"sink","terminal_reason":"retry_exhausted","attempts":2}
+{"type":"exhausted","id":3,"work":{"type":"work_item_v2","fingerprint":{"canonical_path":"/docs/retry-file.md","size_bytes":160,"mtime_unix_secs":1710000400,"etag":null}},"failure_kind":"io","terminal_reason":"non_retryable","attempts":1}

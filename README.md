@@ -427,6 +427,23 @@ Ragloom keeps the WAL append handle open for the lifetime of the process to
 avoid repeated open/close overhead, while still calling `sync_data()` after each
 record so the durability boundary remains one acknowledged append at a time.
 
+### State compatibility contract
+
+Ragloom `v0.5.0` directly reads the supported released `v0.4.x` WAL format,
+with `v0.4.0` as the minimum supported on-disk WAL version. `failed.ndjson`
+enters that compatibility surface in `v0.4.1`; older state directories may not
+have a failed-work journal yet.
+
+These files are durable user-owned state. Ragloom does not silently skip or
+repair unknown future record variants, malformed lines, truncated final writes,
+or other unsupported state shapes. Instead, it fails closed with a `state`
+error that identifies the failing file and line so operators can inspect the
+journal intentionally.
+
+If a future Ragloom release needs an incompatible state change, the project
+will document that boundary explicitly and require a deliberate migration path
+rather than silently reinterpreting older state.
+
 Retries are not persisted as separate WAL records. If the process stops while
 retries are queued, unacknowledged work is replayed from the WAL on the next
 startup.

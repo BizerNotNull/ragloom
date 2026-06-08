@@ -82,6 +82,17 @@ the native replacement primitive for existing files. If replacement fails, the
 original journal is the durability boundary and the command returns a `state`
 error instead of dropping records.
 
+The on-disk state compatibility contract is also part of that support boundary.
+`v0.5.0` directly reads supported released `v0.4.x` WAL state, with `v0.4.0`
+as the minimum supported WAL version. `failed.ndjson` is part of that contract
+starting in `v0.4.1`, when the failed-work journal first became a released
+state surface.
+
+Unknown future record variants, malformed lines, truncated final writes, and
+other unsupported state shapes fail closed with a `state` error. Maintainers
+should treat any future incompatible state change as requiring an explicit,
+documented migration boundary rather than a silent format reinterpretation.
+
 ## Feature Boundaries
 
 Core support boundary maintainers are hardening for the current `v0.4`
