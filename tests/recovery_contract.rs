@@ -395,10 +395,7 @@ async fn seed_compaction_contract_state(
     fs::remove_file(delete_path).expect("delete seeded document");
     let pending_delete = env.scan_with_restart_boundary();
 
-    pending_work
-        .into_iter()
-        .chain(pending_delete.into_iter())
-        .collect()
+    pending_work.into_iter().chain(pending_delete).collect()
 }
 
 async fn run_once(wal_path: &Path, executor: PipelineExecutor, work_items: Vec<WalRecord>) {
