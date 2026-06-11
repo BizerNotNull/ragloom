@@ -117,7 +117,14 @@ cargo run --release -- dry-run \
   --openai-api-key "$OPENAI_API_KEY"
 ```
 
-`check` validates configuration, source wiring, chunker selection, and bootstrap prerequisites without starting ingest. `dry-run` performs the same validation and prints the effective startup choices, including source kind, chunker selection, and whether Ragloom would bootstrap the configured collection. Neither command sends embeddings or writes to Qdrant.
+`check` validates configuration, source wiring, chunker selection, bootstrap prerequisites,
+and local durable state without starting ingest. State preflight validates that existing WAL
+and failed-work journals are readable, use supported record formats, and are writable for a
+real run. Missing state directories succeed when their nearest existing parent is writable;
+the check does not create them. `check` prints the state path and concise journal statuses.
+`dry-run` performs the same validation and also prints the effective startup choices,
+including source kind, chunker selection, and whether Ragloom would bootstrap the configured
+collection. Neither command creates state, sends embeddings, or writes to Qdrant.
 
 With the default OpenAI model, `text-embedding-3-small`, Ragloom can infer the Qdrant vector size automatically during bootstrap.
 
@@ -474,6 +481,10 @@ ragloom replay-failed --config ./ragloom.yaml
 
 `replay-failed` requires either `--state-path` or `--config`. It does not require
 runtime ingest flags such as `--dir`, `--qdrant-url`, or `--collection`.
+On success it prints deterministic `pending`, `requeued`, `skipped`, and `failed`
+counts. `skipped` counts exhausted records already marked as requeued. An unsafe
+or incomplete replay returns a non-zero exit status and includes the partial
+summary in its error context.
 Replay is intentionally at-least-once: if a prior replay appended work into the
 WAL but crashed before marking the failed record requeued, rerunning
 `replay-failed` may append that work again rather than silently losing it.

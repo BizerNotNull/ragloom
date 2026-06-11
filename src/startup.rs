@@ -7,6 +7,8 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::io::BufRead;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::{RagloomError, RagloomErrorKind};
@@ -93,6 +95,14 @@ pub struct ReplayFailedConfig {
     pub state_path: String,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct ReplayFailedSummary {
+    pub pending: usize,
+    pub requeued: usize,
+    pub skipped: usize,
+    pub failed: usize,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CompactStateConfig {
     pub state_path: String,
@@ -128,6 +138,9 @@ pub struct StartupValidationSummary {
     pub embed_backend: String,
     pub chunker_selection: String,
     pub bootstrap: BootstrapPlan,
+    pub state_path: String,
+    pub wal_status: String,
+    pub failed_work_status: String,
 }
 
 impl StartupValidationSummary {
@@ -139,6 +152,9 @@ impl StartupValidationSummary {
             &format!("embed_backend={}", self.embed_backend),
             &format!("chunker={}", self.chunker_selection),
             &format!("bootstrap={}", self.bootstrap.render()),
+            &format!("state_path={}", self.state_path),
+            &format!("wal={}", self.wal_status),
+            &format!("failed_work={}", self.failed_work_status),
         ]
         .join("\n")
     }
@@ -487,6 +503,7 @@ pub async fn prepare_startup(
 pub async fn validate_startup(cfg: &RunConfig) -> Result<StartupValidationSummary, RagloomError> {
     let _ = prepare_startup(cfg, false).await?;
     let _ = prepare_source_runtime(&cfg.source, HashSet::new())?;
+    let state = validate_state_preflight(Path::new(&cfg.state_path))?;
 
     Ok(StartupValidationSummary {
         source_kind: cfg.source.kind().to_string(),
@@ -494,7 +511,149 @@ pub async fn validate_startup(cfg: &RunConfig) -> Result<StartupValidationSummar
         embed_backend: cfg.embed_backend.name().to_string(),
         chunker_selection: chunker_selection(cfg)?,
         bootstrap: bootstrap_plan(cfg)?,
+        state_path: cfg.state_path.clone(),
+        wal_status: state.wal_status,
+        failed_work_status: state.failed_work_status,
     })
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct StatePreflightSummary {
+    wal_status: String,
+    failed_work_status: String,
+}
+
+fn validate_state_preflight(state_path: &Path) -> Result<StatePreflightSummary, RagloomError> {
+    let failed_path = failed_work_path_from_state_path(state_path);
+    let wal_status = validate_state_journal::<crate::state::wal::WalRecord>(state_path, "WAL")?;
+    let failed_work_status =
+        validate_state_journal::<FailedWorkRecord>(&failed_path, "failed-work")?;
+    Ok(StatePreflightSummary {
+        wal_status,
+        failed_work_status,
+    })
+}
+
+fn validate_state_journal<T>(path: &Path, journal_name: &str) -> Result<String, RagloomError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    match std::fs::File::open(path) {
+        Ok(file) => {
+            ensure_writable_path(path, journal_name)?;
+            let mut records = 0usize;
+            for (idx, line) in std::io::BufReader::new(file).lines().enumerate() {
+                let line = line.map_err(|e| {
+                    RagloomError::new(RagloomErrorKind::State, e).with_context(format!(
+                        "failed to read {journal_name} record at line {} in {}",
+                        idx + 1,
+                        path.display()
+                    ))
+                })?;
+                let line = line.strip_suffix('\r').unwrap_or(&line);
+                if line.trim().is_empty() {
+                    continue;
+                }
+                serde_json::from_str::<T>(line).map_err(|e| {
+                    RagloomError::new(RagloomErrorKind::State, e).with_context(format!(
+                        "failed to parse {journal_name} record at line {} in {}",
+                        idx + 1,
+                        path.display()
+                    ))
+                })?;
+                records += 1;
+            }
+            Ok(format!("readable,writable,records={records}"))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let parent = nearest_existing_parent(path)?;
+            ensure_writable_path(&parent, journal_name)?;
+            Ok("missing,creatable".to_string())
+        }
+        Err(err) => Err(
+            RagloomError::new(RagloomErrorKind::State, err).with_context(format!(
+                "failed to read {journal_name} file: {}",
+                path.display()
+            )),
+        ),
+    }
+}
+
+fn nearest_existing_parent(path: &Path) -> Result<PathBuf, RagloomError> {
+    let mut candidate = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    loop {
+        match std::fs::metadata(candidate) {
+            Ok(metadata) if metadata.is_dir() => return Ok(candidate.to_path_buf()),
+            Ok(_) => {
+                return Err(
+                    RagloomError::from_kind(RagloomErrorKind::State).with_context(format!(
+                        "state parent is not a directory: {}",
+                        candidate.display()
+                    )),
+                );
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                candidate = candidate.parent().unwrap_or_else(|| Path::new("."));
+            }
+            Err(err) => {
+                return Err(
+                    RagloomError::new(RagloomErrorKind::State, err).with_context(format!(
+                        "failed to inspect state parent: {}",
+                        candidate.display()
+                    )),
+                );
+            }
+        }
+    }
+}
+
+fn ensure_writable_path(path: &Path, journal_name: &str) -> Result<(), RagloomError> {
+    let metadata = std::fs::metadata(path).map_err(|e| {
+        RagloomError::new(RagloomErrorKind::State, e).with_context(format!(
+            "failed to inspect {journal_name} path: {}",
+            path.display()
+        ))
+    })?;
+    let writable = if metadata.is_dir() {
+        has_directory_create_mode(&metadata)
+    } else {
+        has_write_mode(&metadata)
+    };
+    if metadata.permissions().readonly() || !writable {
+        return Err(
+            RagloomError::from_kind(RagloomErrorKind::State).with_context(format!(
+                "{journal_name} path is not writable: {}",
+                path.display()
+            )),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn has_write_mode(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o222 != 0
+}
+
+#[cfg(unix)]
+fn has_directory_create_mode(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = metadata.permissions().mode();
+    (mode & 0o222 != 0) && (mode & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn has_write_mode(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(not(unix))]
+fn has_directory_create_mode(_metadata: &std::fs::Metadata) -> bool {
+    true
 }
 
 pub fn validate_reloadable_changes(
@@ -582,21 +741,33 @@ pub fn validate_reloadable_changes(
 pub fn replay_failed_into_wal(
     wal: &mut impl WalStore,
     failed_store: &mut impl FailedWorkStore,
-) -> Result<usize, RagloomError> {
+) -> Result<ReplayFailedSummary, RagloomError> {
     let records = failed_store
         .read_all()
         .map_err(|e| e.with_context("failed to read failed-work store"))?;
 
     let pending = pending_failed_work(&records);
-    let replayed = pending.len();
+    let pending_count = pending.len();
+    let exhausted_count = records
+        .iter()
+        .filter(|record| matches!(record, FailedWorkRecord::Exhausted { .. }))
+        .count();
+    let skipped = exhausted_count.saturating_sub(pending_count);
+    let mut requeued = 0usize;
     for item in pending {
-        wal.append(item.work.clone())
-            .map_err(|e| e.with_context("failed to append replayed work into WAL"))?;
-        failed_store
-            .append(FailedWorkRecord::Requeued {
-                exhausted_id: item.id,
-            })
-            .map_err(|e| e.with_context("failed to mark failed work as requeued"))?;
+        if let Err(err) = wal.append(item.work.clone()) {
+            return Err(err.with_context(format!(
+                "failed to append replayed work into WAL; replay summary: pending={pending_count} requeued={requeued} skipped={skipped} failed=1"
+            )));
+        }
+        if let Err(err) = failed_store.append(FailedWorkRecord::Requeued {
+            exhausted_id: item.id,
+        }) {
+            return Err(err.with_context(format!(
+                "failed to mark failed work as requeued; replay summary: pending={pending_count} requeued={requeued} skipped={skipped} failed=1"
+            )));
+        }
+        requeued += 1;
 
         tracing::info!(
             event.name = "ragloom.failed_work.requeued",
@@ -607,10 +778,17 @@ pub fn replay_failed_into_wal(
         );
     }
 
-    Ok(replayed)
+    Ok(ReplayFailedSummary {
+        pending: pending_count,
+        requeued,
+        skipped,
+        failed: 0,
+    })
 }
 
-pub async fn replay_failed_command(cfg: &ReplayFailedConfig) -> Result<usize, RagloomError> {
+pub async fn replay_failed_command(
+    cfg: &ReplayFailedConfig,
+) -> Result<ReplayFailedSummary, RagloomError> {
     let failed_path = failed_work_path_from_state_path(&cfg.state_path);
     let mut wal = crate::state::wal::FileWal::open(&cfg.state_path)
         .map_err(|e| e.with_context("failed to initialize persistent WAL"))?;
@@ -1121,16 +1299,12 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         let summary = runtime.block_on(validate_startup(&cfg)).expect("summary");
 
-        assert_eq!(
-            summary,
-            StartupValidationSummary {
-                source_kind: "filesystem".to_string(),
-                source_target: "/tmp/docs".to_string(),
-                embed_backend: "http".to_string(),
-                chunker_selection: "router".to_string(),
-                bootstrap: BootstrapPlan::Disabled,
-            }
-        );
+        assert_eq!(summary.source_kind, "filesystem");
+        assert_eq!(summary.source_target, "/tmp/docs");
+        assert_eq!(summary.embed_backend, "http");
+        assert_eq!(summary.chunker_selection, "router");
+        assert_eq!(summary.bootstrap, BootstrapPlan::Disabled);
+        assert_eq!(summary.state_path, ".ragloom/wal.ndjson");
     }
 
     #[cfg_attr(miri, ignore = "Miri does not support TCP socket tests")]
@@ -1292,8 +1466,16 @@ mod tests {
             })
             .expect("append exhausted");
 
-        let replayed = replay_failed_into_wal(&mut wal, &mut failed).expect("replay");
-        assert_eq!(replayed, 1);
+        let summary = replay_failed_into_wal(&mut wal, &mut failed).expect("replay");
+        assert_eq!(
+            summary,
+            ReplayFailedSummary {
+                pending: 1,
+                requeued: 1,
+                skipped: 0,
+                failed: 0,
+            }
+        );
         assert_eq!(wal.read_all().expect("read wal"), vec![work]);
         assert_eq!(
             failed.read_all().expect("read failed"),
@@ -1337,8 +1519,16 @@ mod tests {
             .append(FailedWorkRecord::Requeued { exhausted_id: 1 })
             .expect("append requeued");
 
-        let replayed = replay_failed_into_wal(&mut wal, &mut failed).expect("replay");
-        assert_eq!(replayed, 0);
+        let summary = replay_failed_into_wal(&mut wal, &mut failed).expect("replay");
+        assert_eq!(
+            summary,
+            ReplayFailedSummary {
+                pending: 0,
+                requeued: 0,
+                skipped: 1,
+                failed: 0,
+            }
+        );
         assert!(wal.read_all().expect("read wal").is_empty());
     }
 
@@ -1366,9 +1556,143 @@ mod tests {
             })
             .expect("append exhausted");
 
-        let replayed = replay_failed_into_wal(&mut wal, &mut failed).expect("replay");
-        assert_eq!(replayed, 1);
+        let summary = replay_failed_into_wal(&mut wal, &mut failed).expect("replay");
+        assert_eq!(summary.requeued, 1);
         assert_eq!(wal.read_all().expect("read wal"), vec![work.clone(), work]);
+    }
+
+    #[test]
+    fn replay_failed_into_wal_reports_partial_summary_on_failure() {
+        struct FailingWal;
+
+        impl crate::state::wal::WalStore for FailingWal {
+            fn append(
+                &mut self,
+                _record: crate::state::wal::WalRecord,
+            ) -> Result<(), RagloomError> {
+                Err(RagloomError::from_kind(RagloomErrorKind::State)
+                    .with_context("simulated WAL failure"))
+            }
+
+            fn read_all(&self) -> Result<Vec<crate::state::wal::WalRecord>, RagloomError> {
+                Ok(Vec::new())
+            }
+
+            fn is_empty(&self) -> bool {
+                true
+            }
+        }
+
+        let mut failed = crate::state::failed::InMemoryFailedWorkStore::new();
+        failed
+            .append(FailedWorkRecord::Exhausted {
+                id: 1,
+                work: crate::state::wal::WalRecord::DeleteDocument {
+                    canonical_path: "/x/a.txt".to_string(),
+                },
+                failure_kind: crate::state::failed::FailedWorkFailureKind::State,
+                terminal_reason: crate::state::failed::FailedWorkTerminalReason::RetryExhausted,
+                attempts: 2,
+            })
+            .expect("append exhausted");
+
+        let err =
+            replay_failed_into_wal(&mut FailingWal, &mut failed).expect_err("replay should fail");
+
+        assert!(
+            err.to_string()
+                .contains("replay summary: pending=1 requeued=0 skipped=0 failed=1")
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_startup_accepts_missing_state_directory_without_creating_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let state_dir = dir.path().join("missing").join("state");
+        let mut cfg = sample_run_config();
+        cfg.state_path = state_dir.join("wal.ndjson").to_string_lossy().to_string();
+
+        let summary = validate_startup(&cfg).await.expect("validate startup");
+
+        assert_eq!(summary.wal_status, "missing,creatable");
+        assert_eq!(summary.failed_work_status, "missing,creatable");
+        assert!(
+            !state_dir.exists(),
+            "check must not create the state directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_startup_rejects_malformed_existing_wal_without_mutating_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let wal_path = dir.path().join("wal.ndjson");
+        std::fs::write(&wal_path, "{not json}\r\n").expect("write malformed wal");
+        let before = std::fs::read(&wal_path).expect("read before");
+        let mut cfg = sample_run_config();
+        cfg.state_path = wal_path.to_string_lossy().to_string();
+
+        let err = validate_startup(&cfg)
+            .await
+            .expect_err("malformed WAL should fail check");
+
+        assert_eq!(err.kind, RagloomErrorKind::State);
+        assert!(err.to_string().contains("failed to parse WAL record"));
+        assert_eq!(std::fs::read(&wal_path).expect("read after"), before);
+        assert!(!dir.path().join("failed.ndjson").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn validate_startup_rejects_missing_state_when_parent_lacks_execute_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir(&state_dir).expect("create state dir");
+        let original_permissions = std::fs::metadata(&state_dir)
+            .expect("state dir metadata")
+            .permissions();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o222))
+            .expect("remove execute bit");
+        let mut cfg = sample_run_config();
+        cfg.state_path = state_dir.join("wal.ndjson").to_string_lossy().to_string();
+
+        let err = validate_startup(&cfg)
+            .await
+            .expect_err("missing WAL parent without execute bit should fail check");
+
+        std::fs::set_permissions(&state_dir, original_permissions)
+            .expect("restore state dir permissions");
+        assert_eq!(err.kind, RagloomErrorKind::State);
+        let message = err.to_string();
+        assert!(
+            message.contains("failed to read WAL file")
+                || message.contains("WAL path is not writable")
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_startup_rejects_read_only_existing_wal() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let wal_path = dir.path().join("wal.ndjson");
+        std::fs::write(&wal_path, "").expect("write WAL");
+        let original_permissions = std::fs::metadata(&wal_path)
+            .expect("WAL metadata")
+            .permissions();
+        let mut permissions = original_permissions.clone();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&wal_path, permissions).expect("make WAL read-only");
+        let mut cfg = sample_run_config();
+        cfg.state_path = wal_path.to_string_lossy().to_string();
+
+        let err = validate_startup(&cfg)
+            .await
+            .expect_err("read-only WAL should fail check");
+
+        assert_eq!(err.kind, RagloomErrorKind::State);
+        assert!(err.to_string().contains("WAL path is not writable"));
+
+        std::fs::set_permissions(&wal_path, original_permissions).expect("restore WAL permissions");
     }
 
     #[tokio::test]

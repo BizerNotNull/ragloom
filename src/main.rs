@@ -897,8 +897,11 @@ async fn try_main() -> Result<(), RagloomError> {
             return Ok(());
         }
         ParsedCommand::Check(cfg) => {
-            let _ = validate_startup(&cfg).await?;
-            println!("ragloom check ok");
+            let summary = validate_startup(&cfg).await?;
+            println!(
+                "ragloom check ok state_path={} wal={} failed_work={}",
+                summary.state_path, summary.wal_status, summary.failed_work_status
+            );
             return Ok(());
         }
         ParsedCommand::DryRun(cfg) => {
@@ -907,8 +910,11 @@ async fn try_main() -> Result<(), RagloomError> {
             return Ok(());
         }
         ParsedCommand::ReplayFailed(cfg) => {
-            let replayed = replay_failed_command(&cfg).await?;
-            println!("ragloom replay-failed requeued {replayed} work items");
+            let summary = replay_failed_command(&cfg).await?;
+            println!(
+                "ragloom replay-failed pending={} requeued={} skipped={} failed={}",
+                summary.pending, summary.requeued, summary.skipped, summary.failed
+            );
             return Ok(());
         }
         ParsedCommand::CompactState(cfg) => {
@@ -1775,6 +1781,23 @@ sink:
             "replay-failed".to_string(),
             "--state-path".to_string(),
             ".state/ragloom.ndjson".to_string(),
+        ];
+
+        let cmd = parse_args(&args).expect("replay-failed command");
+        assert_eq!(
+            cmd,
+            ParsedCommand::ReplayFailed(ReplayFailedConfig {
+                state_path: ".state/ragloom.ndjson".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_args_returns_replay_failed_command_with_inline_state_path() {
+        let args = vec![
+            "ragloom".to_string(),
+            "replay-failed".to_string(),
+            "--state-path=.state/ragloom.ndjson".to_string(),
         ];
 
         let cmd = parse_args(&args).expect("replay-failed command");
