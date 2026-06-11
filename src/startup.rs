@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -537,11 +538,19 @@ fn validate_state_journal<T>(path: &Path, journal_name: &str) -> Result<String, 
 where
     T: serde::de::DeserializeOwned,
 {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => {
+    match std::fs::File::open(path) {
+        Ok(file) => {
             ensure_writable_path(path, journal_name)?;
             let mut records = 0usize;
-            for (idx, line) in contents.lines().enumerate() {
+            for (idx, line) in std::io::BufReader::new(file).lines().enumerate() {
+                let line = line.map_err(|e| {
+                    RagloomError::new(RagloomErrorKind::State, e).with_context(format!(
+                        "failed to read {journal_name} record at line {} in {}",
+                        idx + 1,
+                        path.display()
+                    ))
+                })?;
+                let line = line.strip_suffix('\r').unwrap_or(&line);
                 if line.trim().is_empty() {
                     continue;
                 }
@@ -608,7 +617,12 @@ fn ensure_writable_path(path: &Path, journal_name: &str) -> Result<(), RagloomEr
             path.display()
         ))
     })?;
-    if metadata.permissions().readonly() || !has_write_mode(&metadata) {
+    let writable = if metadata.is_dir() {
+        has_directory_create_mode(&metadata)
+    } else {
+        has_write_mode(&metadata)
+    };
+    if metadata.permissions().readonly() || !writable {
         return Err(
             RagloomError::from_kind(RagloomErrorKind::State).with_context(format!(
                 "{journal_name} path is not writable: {}",
@@ -625,8 +639,20 @@ fn has_write_mode(metadata: &std::fs::Metadata) -> bool {
     metadata.permissions().mode() & 0o222 != 0
 }
 
+#[cfg(unix)]
+fn has_directory_create_mode(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = metadata.permissions().mode();
+    (mode & 0o222 != 0) && (mode & 0o111 != 0)
+}
+
 #[cfg(not(unix))]
 fn has_write_mode(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(not(unix))]
+fn has_directory_create_mode(_metadata: &std::fs::Metadata) -> bool {
     true
 }
 
@@ -1600,7 +1626,7 @@ mod tests {
     async fn validate_startup_rejects_malformed_existing_wal_without_mutating_it() {
         let dir = tempfile::tempdir().expect("temp dir");
         let wal_path = dir.path().join("wal.ndjson");
-        std::fs::write(&wal_path, "{not json}\n").expect("write malformed wal");
+        std::fs::write(&wal_path, "{not json}\r\n").expect("write malformed wal");
         let before = std::fs::read(&wal_path).expect("read before");
         let mut cfg = sample_run_config();
         cfg.state_path = wal_path.to_string_lossy().to_string();
@@ -1613,6 +1639,32 @@ mod tests {
         assert!(err.to_string().contains("failed to parse WAL record"));
         assert_eq!(std::fs::read(&wal_path).expect("read after"), before);
         assert!(!dir.path().join("failed.ndjson").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn validate_startup_rejects_missing_state_when_parent_lacks_execute_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir(&state_dir).expect("create state dir");
+        let original_permissions = std::fs::metadata(&state_dir)
+            .expect("state dir metadata")
+            .permissions();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o222))
+            .expect("remove execute bit");
+        let mut cfg = sample_run_config();
+        cfg.state_path = state_dir.join("wal.ndjson").to_string_lossy().to_string();
+
+        let err = validate_startup(&cfg)
+            .await
+            .expect_err("missing WAL parent without execute bit should fail check");
+
+        std::fs::set_permissions(&state_dir, original_permissions)
+            .expect("restore state dir permissions");
+        assert_eq!(err.kind, RagloomErrorKind::State);
+        assert!(err.to_string().contains("WAL path is not writable"));
     }
 
     #[tokio::test]
