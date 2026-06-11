@@ -123,7 +123,7 @@ async fn replay_failed_command_preserves_v0_4_0_empty_failed_surface() {
     .await
     .expect("replay v0.4.0");
 
-    assert_eq!(replayed, 0);
+    assert_eq!(replayed.requeued, 0);
     assert!(failed_path.exists());
     assert_eq!(fs::read_to_string(&failed_path).expect("read failed"), "");
 }
@@ -140,7 +140,7 @@ async fn replay_failed_command_replays_pending_v0_4_1_failed_work() {
     .await
     .expect("replay v0.4.1");
 
-    assert_eq!(replayed, 2);
+    assert_eq!(replayed.requeued, 2);
 
     let wal_records = FileWal::open(&wal_path)
         .expect("reopen wal")

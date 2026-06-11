@@ -137,6 +137,18 @@ rich formatting, embedded assets, or full page layout fidelity.
 
 ## Getting Help
 
+### State preflight and replay diagnostics
+
+Run `ragloom check` with the normal runtime flags to validate local durable state
+before ingest startup. It reports the configured state path and whether the WAL
+and failed-work journal are readable and writable, or missing but safely
+creatable. The command does not create or append state.
+
+`ragloom replay-failed --state-path <path>` reports deterministic `pending`,
+`requeued`, `skipped`, and `failed` counts. A non-zero exit status means replay
+could not complete safely; preserve the journals and include the sanitized error
+context when requesting support.
+
 ### Check the documentation first
 
 - Review `README.md` for quickstart and configuration

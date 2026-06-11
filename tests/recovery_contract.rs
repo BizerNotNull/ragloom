@@ -174,7 +174,10 @@ async fn retry_exhaustion_replay_failed_and_later_success_acknowledge_work() {
     })
     .await
     .expect("replay failed work");
-    assert_eq!(replayed, 1, "replay-failed should requeue the pending item");
+    assert_eq!(
+        replayed.requeued, 1,
+        "replay-failed should requeue the pending item"
+    );
     assert!(
         pending_failed_work(&read_failed_work(&failed_path)).is_empty(),
         "requeued failed work should no longer be pending"
