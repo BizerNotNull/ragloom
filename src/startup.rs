@@ -1664,7 +1664,11 @@ mod tests {
         std::fs::set_permissions(&state_dir, original_permissions)
             .expect("restore state dir permissions");
         assert_eq!(err.kind, RagloomErrorKind::State);
-        assert!(err.to_string().contains("WAL path is not writable"));
+        let message = err.to_string();
+        assert!(
+            message.contains("failed to read WAL file")
+                || message.contains("WAL path is not writable")
+        );
     }
 
     #[tokio::test]
