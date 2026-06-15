@@ -97,6 +97,7 @@ async fn pipeline_embeds_text_loaded_from_fingerprint_v2() {
             Arc::new(loader.clone()),
         ),
         wal: Arc::clone(&wal),
+        metrics: None,
     };
 
     tokio::spawn(async move {

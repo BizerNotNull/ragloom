@@ -653,8 +653,7 @@ async fn run_worker_with_retry_inner(
                     } else {
                         FailedWorkTerminalReason::NonRetryable
                     };
-
-                    if let Err(persist_err) = failed_work
+                    match failed_work
                         .append_exhausted(
                             record.clone(),
                             FailedWorkFailureKind::from_error_kind(err.kind),
@@ -663,14 +662,31 @@ async fn run_worker_with_retry_inner(
                         )
                         .await
                     {
-                        tracing::error!(
-                            event.name = "ragloom.failed_work.persist_failed",
-                            record_type,
-                            canonical_path = canonical_path,
-                            error.kind = %persist_err.kind,
-                            error.message = %persist_err,
-                            "ragloom.failed_work.persist_failed"
-                        );
+                        Err(persist_err) => {
+                            tracing::error!(
+                                event.name = "ragloom.failed_work.persist_failed",
+                                record_type,
+                                canonical_path = canonical_path,
+                                error.kind = %persist_err.kind,
+                                error.message = %persist_err,
+                                "ragloom.failed_work.persist_failed"
+                            );
+                        }
+                        Ok(id) => {
+                            let failed_record = crate::state::failed::FailedWorkRecord::Exhausted {
+                                id,
+                                work: record.clone(),
+                                failure_kind: FailedWorkFailureKind::from_error_kind(err.kind),
+                                terminal_reason,
+                                attempts: attempt,
+                            };
+                            if let (Some(metrics), Ok(failed_record_len)) =
+                                (&metrics, ndjson_record_len(&failed_record))
+                            {
+                                metrics.record_failed_work_appended_bytes(failed_record_len);
+                                metrics.record_failed_work_pending_increase(1);
+                            }
+                        }
                     }
                 }
 
@@ -1030,6 +1046,14 @@ impl WorkExecutor for PipelineExecutor {
 pub struct AckingExecutor<E: WorkExecutor, W: WalStore = InMemoryWal> {
     pub inner: E,
     pub wal: std::sync::Arc<tokio::sync::Mutex<W>>,
+    pub metrics: Option<IngestionMetrics>,
+}
+
+impl<E: WorkExecutor, W: WalStore> AckingExecutor<E, W> {
+    pub fn with_metrics(mut self, metrics: IngestionMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -1055,9 +1079,14 @@ impl<E: WorkExecutor, W: WalStore + 'static> WorkExecutor for AckingExecutor<E, 
         if let Some(ack) = ack {
             let mut wal = self.wal.lock().await;
             let elapsed = std::time::Instant::now();
+            let ack_len = ndjson_record_len(&ack)?;
             wal.append(ack).map_err(|e| {
                 RagloomError::new(e.kind, e).with_context("failed to append sink ack")
             })?;
+            if let Some(metrics) = &self.metrics {
+                metrics.record_wal_appended_bytes(ack_len);
+                metrics.record_wal_pending_decrease(1);
+            }
             tracing::debug!(
                 ack_type = "sink_ack",
                 elapsed_ms = elapsed.elapsed().as_millis() as u64,
@@ -1066,6 +1095,14 @@ impl<E: WorkExecutor, W: WalStore + 'static> WorkExecutor for AckingExecutor<E, 
         }
         Ok(())
     }
+}
+
+fn ndjson_record_len<T: serde::Serialize>(record: &T) -> Result<usize, RagloomError> {
+    let encoded = serde_json::to_string(record).map_err(|e| {
+        RagloomError::new(RagloomErrorKind::State, e)
+            .with_context("failed to encode durable state record")
+    })?;
+    Ok(encoded.len() + 1)
 }
 
 /// Stops a running async runtime.
@@ -1250,6 +1287,19 @@ impl<S: Source + Send + 'static, W: WalStore + 'static> AsyncRuntime<S, W> {
                 let mut discovered_files = 0usize;
 
                 for record in after_records.into_iter().skip(before) {
+                    if let Some(metrics) = &self.metrics
+                        && matches!(
+                            record,
+                            WalRecord::WorkItem { .. }
+                                | WalRecord::WorkItemV2 { .. }
+                                | WalRecord::DeleteDocument { .. }
+                        )
+                    {
+                        if let Ok(record_len) = ndjson_record_len(&record) {
+                            metrics.record_wal_appended_bytes(record_len);
+                        }
+                        metrics.record_wal_pending_increase(1);
+                    }
                     if matches!(
                         record,
                         WalRecord::WorkItem { .. } | WalRecord::WorkItemV2 { .. }
@@ -1440,6 +1490,28 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[tokio::test]
+    async fn async_runtime_updates_durable_state_metrics_when_planning_work() {
+        let mut source = FakeSource::default();
+        source.push([1u8; 32]);
+        let metrics = IngestionMetrics::default();
+        metrics.seed_durable_state(0, 0, 0, 0);
+
+        let runtime = Runtime::new(source);
+        let (mut rx, shutdown) = AsyncRuntime::new(runtime, 1)
+            .with_metrics(metrics.clone())
+            .start();
+
+        let record = rx.recv().await.expect("planned work");
+        assert!(matches!(record, WalRecord::WorkItemV2 { .. }));
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.wal_pending_work, 1);
+        assert!(snapshot.wal_bytes > 0);
+
+        shutdown.shutdown();
     }
 
     #[tokio::test]
@@ -1707,6 +1779,7 @@ mod tests {
                 std::sync::Arc::new(loader.clone()),
             ),
             wal: std::sync::Arc::clone(&wal),
+            metrics: None,
         };
 
         tokio::spawn(async move {
@@ -1830,6 +1903,7 @@ mod tests {
             )
             .with_summary(summary.clone()),
             wal: std::sync::Arc::clone(&wal),
+            metrics: None,
         };
 
         let wal_for_worker = std::sync::Arc::clone(&wal);
@@ -1968,6 +2042,7 @@ mod tests {
                 std::sync::Arc::new(loader.clone()),
             ),
             wal: std::sync::Arc::clone(&wal),
+            metrics: None,
         };
 
         tokio::spawn(async move {
@@ -2097,6 +2172,7 @@ mod tests {
         let executor = AckingExecutor {
             inner,
             wal: std::sync::Arc::clone(&wal),
+            metrics: None,
         };
 
         executor
@@ -2123,6 +2199,43 @@ mod tests {
             }),
             "expected SinkAckV2"
         );
+    }
+
+    #[tokio::test]
+    async fn executor_writes_sink_ack_updates_durable_state_metrics() {
+        let wal = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::state::wal::InMemoryWal::new(),
+        ));
+        let metrics = IngestionMetrics::default();
+        metrics.seed_durable_state(0, 0, 1, 0);
+
+        let inner = RecordingExecutor {
+            seen: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        };
+        let executor = AckingExecutor {
+            inner,
+            wal: std::sync::Arc::clone(&wal),
+            metrics: None,
+        }
+        .with_metrics(metrics.clone());
+
+        executor
+            .execute(WalRecord::WorkItemV2 {
+                fingerprint: crate::ids::FileFingerprint {
+                    canonical_path: "/x/a.txt".to_string(),
+                    size_bytes: 10,
+                    mtime_unix_secs: 100,
+                    etag: None,
+                },
+            })
+            .await
+            .expect("execute");
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.wal_pending_work, 0);
+        assert!(snapshot.wal_bytes > 0);
+        assert_eq!(snapshot.failed_work_pending, 0);
+        assert_eq!(snapshot.failed_work_bytes, 0);
     }
 
     #[tokio::test]
@@ -2184,6 +2297,7 @@ mod tests {
         let executor = AckingExecutor {
             inner,
             wal: std::sync::Arc::clone(&wal),
+            metrics: None,
         };
 
         tokio::spawn(async move {
@@ -2367,6 +2481,58 @@ mod tests {
                 attempts: 2,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn retry_worker_updates_durable_failed_work_metrics() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let failed_work = crate::state::failed::FailedWorkJournal::new(
+            crate::state::failed::InMemoryFailedWorkStore::new(),
+        );
+        let failed_work_for_worker = failed_work.clone();
+        let metrics = IngestionMetrics::default();
+        metrics.seed_durable_state(0, 0, 1, 0);
+        let executor = ScriptedExecutor::new(vec![
+            Err(RagloomErrorKind::Embed),
+            Err(RagloomErrorKind::Embed),
+        ]);
+
+        let metrics_for_worker = metrics.clone();
+        let worker = tokio::spawn(async move {
+            run_worker_with_live_retry_failed_work_and_metrics(
+                rx,
+                executor,
+                LiveRetryPolicy::new(RetryPolicy {
+                    max_attempts: 2,
+                    max_queued_retries: 1,
+                    initial_backoff: std::time::Duration::ZERO,
+                    max_backoff: std::time::Duration::ZERO,
+                })
+                .expect("policy"),
+                Some(failed_work_for_worker),
+                None,
+                Some(metrics_for_worker),
+            )
+            .await;
+        });
+
+        tx.send(WalRecord::WorkItemV2 {
+            fingerprint: crate::ids::FileFingerprint {
+                canonical_path: "/x/a.txt".to_string(),
+                size_bytes: 10,
+                mtime_unix_secs: 100,
+                etag: None,
+            },
+        })
+        .await
+        .expect("send");
+        drop(tx);
+        worker.await.expect("worker");
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.wal_pending_work, 1);
+        assert_eq!(snapshot.failed_work_pending, 1);
+        assert!(snapshot.failed_work_bytes > 0);
     }
 
     #[tokio::test]
