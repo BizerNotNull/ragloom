@@ -1505,11 +1505,12 @@ mod tests {
             .start();
 
         let record = rx.recv().await.expect("planned work");
+        let expected_record_len = ndjson_record_len(&record).expect("record len") as u64;
         assert!(matches!(record, WalRecord::WorkItemV2 { .. }));
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.wal_pending_work, 1);
-        assert!(snapshot.wal_bytes > 0);
+        assert_eq!(snapshot.wal_bytes, expected_record_len);
 
         shutdown.shutdown();
     }
@@ -2219,21 +2220,25 @@ mod tests {
         }
         .with_metrics(metrics.clone());
 
+        let fingerprint = crate::ids::FileFingerprint {
+            canonical_path: "/x/a.txt".to_string(),
+            size_bytes: 10,
+            mtime_unix_secs: 100,
+            etag: None,
+        };
+        let expected_ack_len = ndjson_record_len(&WalRecord::SinkAckV2 {
+            fingerprint: fingerprint.clone(),
+        })
+        .expect("ack len") as u64;
+
         executor
-            .execute(WalRecord::WorkItemV2 {
-                fingerprint: crate::ids::FileFingerprint {
-                    canonical_path: "/x/a.txt".to_string(),
-                    size_bytes: 10,
-                    mtime_unix_secs: 100,
-                    etag: None,
-                },
-            })
+            .execute(WalRecord::WorkItemV2 { fingerprint })
             .await
             .expect("execute");
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.wal_pending_work, 0);
-        assert!(snapshot.wal_bytes > 0);
+        assert_eq!(snapshot.wal_bytes, expected_ack_len);
         assert_eq!(snapshot.failed_work_pending, 0);
         assert_eq!(snapshot.failed_work_bytes, 0);
     }
@@ -2516,23 +2521,35 @@ mod tests {
             .await;
         });
 
-        tx.send(WalRecord::WorkItemV2 {
-            fingerprint: crate::ids::FileFingerprint {
-                canonical_path: "/x/a.txt".to_string(),
-                size_bytes: 10,
-                mtime_unix_secs: 100,
-                etag: None,
+        let fingerprint = crate::ids::FileFingerprint {
+            canonical_path: "/x/a.txt".to_string(),
+            size_bytes: 10,
+            mtime_unix_secs: 100,
+            etag: None,
+        };
+        let failed_record = crate::state::failed::FailedWorkRecord::Exhausted {
+            id: 1,
+            work: WalRecord::WorkItemV2 {
+                fingerprint: fingerprint.clone(),
             },
-        })
-        .await
-        .expect("send");
+            failure_kind: crate::state::failed::FailedWorkFailureKind::Embed,
+            terminal_reason: crate::state::failed::FailedWorkTerminalReason::RetryExhausted,
+            attempts: 2,
+        };
+
+        tx.send(WalRecord::WorkItemV2 { fingerprint })
+            .await
+            .expect("send");
         drop(tx);
         worker.await.expect("worker");
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.wal_pending_work, 1);
         assert_eq!(snapshot.failed_work_pending, 1);
-        assert!(snapshot.failed_work_bytes > 0);
+        assert_eq!(
+            snapshot.failed_work_bytes,
+            ndjson_record_len(&failed_record).expect("failed record len") as u64
+        );
     }
 
     #[tokio::test]

@@ -9,7 +9,7 @@ pub mod compact;
 pub mod failed;
 pub mod wal;
 
-use std::io::ErrorKind;
+use std::io::{BufRead, ErrorKind};
 use std::path::Path;
 
 use crate::error::{RagloomError, RagloomErrorKind};
@@ -59,8 +59,8 @@ fn read_state_records<T>(path: &Path, label: &str) -> Result<Vec<T>, RagloomErro
 where
     T: serde::de::DeserializeOwned,
 {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => {
             return Err(RagloomError::new(RagloomErrorKind::State, err)
@@ -68,12 +68,20 @@ where
         }
     };
 
+    let reader = std::io::BufReader::new(file);
     let mut records = Vec::new();
-    for (idx, line) in contents.lines().enumerate() {
+    for (idx, line_result) in reader.lines().enumerate() {
+        let line = line_result.map_err(|e| {
+            RagloomError::new(RagloomErrorKind::State, e).with_context(format!(
+                "failed to read {label} line {} in {}",
+                idx + 1,
+                path.display()
+            ))
+        })?;
         if line.trim().is_empty() {
             continue;
         }
-        let record = serde_json::from_str::<T>(line).map_err(|e| {
+        let record = serde_json::from_str::<T>(&line).map_err(|e| {
             RagloomError::new(RagloomErrorKind::State, e).with_context(format!(
                 "failed to parse {label} record at line {} in {}",
                 idx + 1,

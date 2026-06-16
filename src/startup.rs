@@ -1661,7 +1661,7 @@ mod tests {
         assert_eq!(snapshot.wal_pending_work, 1);
         assert_eq!(snapshot.failed_work_pending, 0);
         assert!(snapshot.wal_bytes > before.wal_bytes);
-        assert!(snapshot.failed_work_bytes > 0);
+        assert!(snapshot.failed_work_bytes > before.failed_work_bytes);
     }
 
     #[tokio::test]
@@ -1758,7 +1758,7 @@ mod tests {
     async fn compact_state_command_preserves_observable_replay_state() {
         let dir = tempfile::tempdir().expect("temp dir");
         let wal_path = dir.path().join("wal.ndjson");
-        let failed_path = dir.path().join("failed.ndjson");
+        let failed_path = failed_work_path_from_state_path(&wal_path);
 
         let mut wal = crate::state::wal::FileWal::open(&wal_path).expect("open wal");
         let a_v1 = crate::ids::FileFingerprint {
@@ -1880,7 +1880,7 @@ mod tests {
     async fn compact_state_command_changes_durable_state_metric_sizes_without_changing_backlog() {
         let dir = tempfile::tempdir().expect("temp dir");
         let wal_path = dir.path().join("wal.ndjson");
-        let failed_path = dir.path().join("failed.ndjson");
+        let failed_path = failed_work_path_from_state_path(&wal_path);
 
         let mut wal = crate::state::wal::FileWal::open(&wal_path).expect("open wal");
         let fingerprint = crate::ids::FileFingerprint {
