@@ -84,6 +84,7 @@ async fn delete_sync_survives_restart_when_reusing_same_wal() {
     let executor = AckingExecutor {
         inner: DeleteOnlyExecutor::default(),
         wal: Arc::clone(&wal),
+        metrics: None,
     };
     let worker = tokio::spawn(async move {
         run_worker(rx, executor).await;

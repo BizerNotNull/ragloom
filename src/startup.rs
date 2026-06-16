@@ -1606,6 +1606,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replay_failed_command_changes_durable_state_metrics_snapshot() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let wal_path = dir.path().join("wal.ndjson");
+        let failed_path = failed_work_path_from_state_path(&wal_path);
+        let work = crate::state::wal::WalRecord::WorkItemV2 {
+            fingerprint: crate::ids::FileFingerprint {
+                canonical_path: "/x/a.txt".to_string(),
+                size_bytes: 10,
+                mtime_unix_secs: 100,
+                etag: None,
+            },
+        };
+
+        FileFailedWorkStore::open(&failed_path)
+            .expect("open failed")
+            .append(FailedWorkRecord::Exhausted {
+                id: 1,
+                work: work.clone(),
+                failure_kind: crate::state::failed::FailedWorkFailureKind::Embed,
+                terminal_reason: crate::state::failed::FailedWorkTerminalReason::RetryExhausted,
+                attempts: 2,
+            })
+            .expect("append failed");
+
+        let metrics = crate::observability::metrics::IngestionMetrics::default();
+        let before = crate::state::durable_state_snapshot_from_paths(&wal_path)
+            .expect("state snapshot before replay");
+        metrics.replace_durable_state(
+            before.wal_bytes,
+            before.failed_work_bytes,
+            before.wal_pending_work,
+            before.failed_work_pending,
+        );
+
+        replay_failed_command(&ReplayFailedConfig {
+            state_path: wal_path.to_string_lossy().to_string(),
+        })
+        .await
+        .expect("replay failed");
+
+        let after = crate::state::durable_state_snapshot_from_paths(&wal_path)
+            .expect("state snapshot after replay");
+        metrics.replace_durable_state(
+            after.wal_bytes,
+            after.failed_work_bytes,
+            after.wal_pending_work,
+            after.failed_work_pending,
+        );
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(before.wal_pending_work, 0);
+        assert_eq!(before.failed_work_pending, 1);
+        assert_eq!(snapshot.wal_pending_work, 1);
+        assert_eq!(snapshot.failed_work_pending, 0);
+        assert!(snapshot.wal_bytes > before.wal_bytes);
+        assert!(snapshot.failed_work_bytes > before.failed_work_bytes);
+    }
+
+    #[tokio::test]
     async fn validate_startup_accepts_missing_state_directory_without_creating_it() {
         let dir = tempfile::tempdir().expect("temp dir");
         let state_dir = dir.path().join("missing").join("state");
@@ -1699,7 +1758,7 @@ mod tests {
     async fn compact_state_command_preserves_observable_replay_state() {
         let dir = tempfile::tempdir().expect("temp dir");
         let wal_path = dir.path().join("wal.ndjson");
-        let failed_path = dir.path().join("failed.ndjson");
+        let failed_path = failed_work_path_from_state_path(&wal_path);
 
         let mut wal = crate::state::wal::FileWal::open(&wal_path).expect("open wal");
         let a_v1 = crate::ids::FileFingerprint {
@@ -1815,6 +1874,83 @@ mod tests {
             crate::state::failed::next_failed_work_id(&failed_after),
             crate::state::failed::next_failed_work_id(&failed_before)
         );
+    }
+
+    #[tokio::test]
+    async fn compact_state_command_changes_durable_state_metric_sizes_without_changing_backlog() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let wal_path = dir.path().join("wal.ndjson");
+        let failed_path = failed_work_path_from_state_path(&wal_path);
+
+        let mut wal = crate::state::wal::FileWal::open(&wal_path).expect("open wal");
+        let fingerprint = crate::ids::FileFingerprint {
+            canonical_path: "/x/a.txt".to_string(),
+            size_bytes: 10,
+            mtime_unix_secs: 100,
+            etag: None,
+        };
+        wal.append(crate::state::wal::WalRecord::WorkItemV2 {
+            fingerprint: fingerprint.clone(),
+        })
+        .expect("append work");
+        wal.append(crate::state::wal::WalRecord::SinkAckV2 {
+            fingerprint: fingerprint.clone(),
+        })
+        .expect("append ack");
+        wal.append(crate::state::wal::WalRecord::DeleteDocument {
+            canonical_path: "/x/b.txt".to_string(),
+        })
+        .expect("append delete");
+
+        let mut failed = FileFailedWorkStore::open(&failed_path).expect("open failed");
+        failed
+            .append(FailedWorkRecord::Exhausted {
+                id: 1,
+                work: crate::state::wal::WalRecord::DeleteDocument {
+                    canonical_path: "/x/b.txt".to_string(),
+                },
+                failure_kind: crate::state::failed::FailedWorkFailureKind::Sink,
+                terminal_reason: crate::state::failed::FailedWorkTerminalReason::RetryExhausted,
+                attempts: 2,
+            })
+            .expect("append failed");
+        failed
+            .append(FailedWorkRecord::Requeued { exhausted_id: 1 })
+            .expect("append requeued");
+
+        let metrics = crate::observability::metrics::IngestionMetrics::default();
+        let before = crate::state::durable_state_snapshot_from_paths(&wal_path)
+            .expect("state snapshot before compaction");
+        metrics.replace_durable_state(
+            before.wal_bytes,
+            before.failed_work_bytes,
+            before.wal_pending_work,
+            before.failed_work_pending,
+        );
+
+        compact_state_command(&CompactStateConfig {
+            state_path: wal_path.to_string_lossy().to_string(),
+        })
+        .await
+        .expect("compact state");
+
+        let after = crate::state::durable_state_snapshot_from_paths(&wal_path)
+            .expect("state snapshot after compaction");
+        metrics.replace_durable_state(
+            after.wal_bytes,
+            after.failed_work_bytes,
+            after.wal_pending_work,
+            after.failed_work_pending,
+        );
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.wal_pending_work, before.wal_pending_work as u64);
+        assert_eq!(
+            snapshot.failed_work_pending,
+            before.failed_work_pending as u64
+        );
+        assert!(snapshot.wal_bytes <= before.wal_bytes);
+        assert!(snapshot.failed_work_bytes <= before.failed_work_bytes);
     }
 
     #[tokio::test]

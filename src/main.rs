@@ -22,6 +22,7 @@ use ragloom::startup::{
     compact_state_command, prepare_startup, replay_failed_command, validate_reloadable_changes,
     validate_startup,
 };
+use ragloom::state::durable_state_snapshot_from_paths;
 use ragloom::state::failed::{
     FailedWorkJournal, FileFailedWorkStore, failed_work_path_from_state_path,
 };
@@ -1089,6 +1090,15 @@ async fn start_running_system(cfg: &RunConfig) -> Result<RunningSystem, RagloomE
             }
         };
 
+    let durable_state = durable_state_snapshot_from_paths(std::path::Path::new(&cfg.state_path))
+        .map_err(|e| e.with_context("failed to summarize durable state metrics"))?;
+    metrics.seed_durable_state(
+        durable_state.wal_bytes,
+        durable_state.failed_work_bytes,
+        durable_state.wal_pending_work,
+        durable_state.failed_work_pending,
+    );
+
     let previously_observed_paths = {
         let guard = wal.lock().await;
         let records = guard
@@ -1133,6 +1143,7 @@ async fn start_running_system(cfg: &RunConfig) -> Result<RunningSystem, RagloomE
     let executor = AckingExecutor {
         inner: pipeline,
         wal: std::sync::Arc::clone(&wal),
+        metrics: Some(metrics.clone()),
     };
     let retry_policy = RetryPolicy {
         max_attempts: cfg.retry_max_attempts,

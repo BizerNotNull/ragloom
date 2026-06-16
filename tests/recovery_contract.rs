@@ -408,6 +408,7 @@ async fn run_once(wal_path: &Path, executor: PipelineExecutor, work_items: Vec<W
     let executor = AckingExecutor {
         inner: executor,
         wal,
+        metrics: None,
     };
     let (tx, rx) = tokio::sync::mpsc::channel(work_items.len().max(1));
     let worker = tokio::spawn(async move {

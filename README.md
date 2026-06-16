@@ -729,6 +729,22 @@ Current metrics:
 - `ragloom_retry_exhausted_total`
 - `ragloom_retry_queue_depth`
 - `ragloom_work_queue_depth`
+- `ragloom_state_wal_bytes`
+- `ragloom_state_failed_work_bytes`
+- `ragloom_state_wal_pending_work`
+- `ragloom_state_failed_work_pending`
+
+Durable-state metrics are numeric only:
+
+- `ragloom_state_wal_bytes` reports the current WAL file size in bytes
+- `ragloom_state_failed_work_bytes` reports the current `failed.ndjson` size in bytes
+- `ragloom_state_wal_pending_work` reports the current count of durable WAL work items awaiting acknowledgement
+- `ragloom_state_failed_work_pending` reports the current count of durable failed-work items still pending operator replay
+
+These metrics do not expose document text, API keys, canonical paths, local
+paths, or failure-detail payloads. Ragloom updates them at startup and at
+durable state transition points; it does not re-parse the full journals on each
+metrics scrape.
 
 For first-run validation, look for `ragloom.ingest.summary`. Ragloom emits it after an ingest window goes idle and again on shutdown when there is still unreported work. The summary stays structured and includes counters such as:
 

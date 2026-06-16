@@ -352,6 +352,18 @@ ragloom_retry_queue_depth {}
 # HELP ragloom_work_queue_depth Current runtime-to-worker queue depth.
 # TYPE ragloom_work_queue_depth gauge
 ragloom_work_queue_depth {}
+# HELP ragloom_state_wal_bytes Current WAL file size in bytes.
+# TYPE ragloom_state_wal_bytes gauge
+ragloom_state_wal_bytes {}
+# HELP ragloom_state_failed_work_bytes Current failed-work journal size in bytes.
+# TYPE ragloom_state_failed_work_bytes gauge
+ragloom_state_failed_work_bytes {}
+# HELP ragloom_state_wal_pending_work Current durable WAL work items awaiting acknowledgement.
+# TYPE ragloom_state_wal_pending_work gauge
+ragloom_state_wal_pending_work {}
+# HELP ragloom_state_failed_work_pending Current durable failed-work items pending operator replay.
+# TYPE ragloom_state_failed_work_pending gauge
+ragloom_state_failed_work_pending {}
 ",
         snapshot.discovered_files_total,
         snapshot.indexed_files_total,
@@ -361,7 +373,11 @@ ragloom_work_queue_depth {}
         snapshot.retry_attempts_total,
         snapshot.retry_exhausted_total,
         snapshot.retry_queue_depth,
-        snapshot.work_queue_depth
+        snapshot.work_queue_depth,
+        snapshot.wal_bytes,
+        snapshot.failed_work_bytes,
+        snapshot.wal_pending_work,
+        snapshot.failed_work_pending
     )
 }
 
@@ -484,6 +500,7 @@ mod tests {
         metrics.record_retry_scheduled(1);
         metrics.record_retry_exhausted(0);
         metrics.record_failure();
+        metrics.seed_durable_state(17, 9, 3, 2);
         let (addr, server) = spawn_server_with_metrics(state, metrics).await;
 
         let response = request(addr, "GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
@@ -501,6 +518,12 @@ mod tests {
         assert!(body.contains("ragloom_retry_exhausted_total 1"));
         assert!(body.contains("ragloom_retry_queue_depth 0"));
         assert!(body.contains("ragloom_work_queue_depth 0"));
+        assert!(body.contains("ragloom_state_wal_bytes 17"));
+        assert!(body.contains("ragloom_state_failed_work_bytes 9"));
+        assert!(body.contains("ragloom_state_wal_pending_work 3"));
+        assert!(body.contains("ragloom_state_failed_work_pending 2"));
+        assert!(!body.contains("/x/a.txt"));
+        assert!(!body.contains("scripted failure"));
 
         server.shutdown().await;
     }
