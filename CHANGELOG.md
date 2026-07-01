@@ -8,6 +8,10 @@
   `failed.ndjson` shapes under the current implementation.
 
 ### Changed
+- Upgraded `pdf-extract` to `0.12.0` and `lopdf` to `0.42.0` to address
+  `RUSTSEC-2026-0187`. The no-fix `ttf-parser` maintenance advisory remains a
+  narrowly scoped `cargo-deny` exception until `lopdf` migrates away from it.
+- Updated `quinn-proto` to `0.11.15` to address `RUSTSEC-2026-0185`.
 - Defined the `v0.5.0` on-disk compatibility contract as direct readability of
   supported released `v0.4.x` WAL state, with `v0.4.0` as the minimum
   supported WAL version and `failed.ndjson` support applying from `v0.4.1+`.
