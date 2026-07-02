@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Removed
+- Removed the deprecated `ChunkerConfig`, `ChunkingStrategy`,
+  `chunk_document`, and `chunk_text` compatibility APIs. Use
+  `RecursiveChunker` through the `Chunker` trait instead.
+
 ## [0.5.0] - 2026-07-02
 
 ### Added
