@@ -227,12 +227,12 @@ Download the archive for your platform from the GitHub Release page, extract it,
 Examples:
 
 ```bash
-tar -xzf ragloom-v0.4.1-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf ragloom-v0.5.0-x86_64-unknown-linux-gnu.tar.gz
 ./ragloom --version
 ```
 
 ```powershell
-Expand-Archive .\ragloom-v0.4.1-x86_64-pc-windows-msvc.zip -DestinationPath .
+Expand-Archive .\ragloom-v0.5.0-x86_64-pc-windows-msvc.zip -DestinationPath .
 .\ragloom.exe --version
 ```
 
@@ -829,11 +829,23 @@ Status: shipped in `v0.2.0`, with restart-safe delete synchronization refined in
 
 ### v0.4 - Explicit platform expansion boundaries
 
+Status: shipped in `v0.4.1`.
+
 - keep the local-filesystem and polling-S3 ingest paths release-ready on supported Linux and Windows targets
 - require green `ci` and `quality-deep` workflow states, or equivalent local maintainer verification, before cutting the release
 - keep feature-gated paths such as `fastembed` exercised by dedicated checks without making them the default runtime path
 - document PDF and DOCX extraction limits explicitly instead of implying broader parser guarantees
 - keep remote-source scope narrow by supporting S3 only rather than expanding into a general remote-ingestion platform
+
+### v0.5 - State and recovery hardening
+
+Status: shipped in `v0.5.0`.
+
+- crash-safe explicit compaction for WAL and failed-work state
+- direct compatibility with supported released `v0.4.x` state
+- recovery contracts covering pending work, deletes, acknowledgements, and point identity
+- state preflight checks and operator-facing replay summaries
+- durable-state backlog and journal-size metrics
 
 ## Limitations
 
