@@ -10,7 +10,6 @@ pub mod code;
 mod engine;
 mod error;
 mod fingerprint;
-mod legacy;
 pub mod markdown;
 mod public_types;
 pub mod recursive;
@@ -32,9 +31,6 @@ pub use semantic::{
     SemanticSignalProvider,
 };
 pub use size::{CharCounter, SizeMetric, TiktokenCounter, TokenCounter};
-
-#[allow(deprecated)]
-pub use legacy::{ChunkerConfig, ChunkingStrategy, chunk_document, chunk_text};
 
 /// Per-call metadata that a [`Chunker`] may use to choose behaviour.
 ///

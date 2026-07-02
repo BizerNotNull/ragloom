@@ -1,0 +1,8 @@
+[advisories]
+# docx-lite 0.2.0 and rust-s3 0.37.2 constrain quick-xml below the patched
+# 0.41.0 release. Keep this list aligned with deny.toml and remove both exact
+# exceptions as soon as the upstream dependency constraints permit upgrading.
+ignore = [
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]

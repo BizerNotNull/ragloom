@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Removed
+- Removed the deprecated `ChunkerConfig`, `ChunkingStrategy`,
+  `chunk_document`, and `chunk_text` compatibility APIs. Use
+  `RecursiveChunker` through the `Chunker` trait instead.
+
+### Security
+- Accepted temporary, exact advisory exceptions for `RUSTSEC-2026-0194` and
+  `RUSTSEC-2026-0195`. The affected `quick-xml` versions remain transitive
+  through `docx-lite 0.2.0` and `rust-s3 0.37.2`, whose released dependency
+  constraints do not yet permit the patched `quick-xml 0.41.0`. Crafted DOCX
+  XML or responses from a configured S3 endpoint can cause CPU or memory
+  exhaustion; remove both exceptions as soon as both upstream crates permit
+  the patched version.
+
 ## [0.5.0] - 2026-07-02
 
 ### Added

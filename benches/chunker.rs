@@ -1,12 +1,9 @@
-//! Chunker throughput benchmark — legacy shim vs direct RecursiveChunker,
-//! plus Markdown and Rust CodeChunker sequences.
+//! Chunker throughput benchmarks for recursive, Markdown, code-aware, and
+//! semantic chunking.
 //!
 //! # Why
-//! Phase 1 preserves the legacy API through a deprecated shim. This bench
-//! confirms the shim does not introduce a meaningful overhead relative to a
-//! direct `Chunker` trait call, and measures throughput across a range of
-//! document sizes for future regression tracking. Phase 2 adds Markdown and
-//! Rust code-aware chunkers to the comparison set.
+//! These benchmarks measure throughput across a range of document sizes for
+//! regression tracking.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use ragloom::transform::chunker::semantic::{
@@ -18,8 +15,6 @@ use ragloom::transform::chunker::{
     recursive::{RecursiveChunker, RecursiveConfig},
     size::SizeMetric,
 };
-#[allow(deprecated)]
-use ragloom::transform::chunker::{ChunkerConfig, chunk_document};
 
 struct StaticSignal;
 impl SemanticSignalProvider for StaticSignal {
@@ -72,15 +67,6 @@ fn bench(c: &mut Criterion) {
     for &n in &sizes {
         let text = sample(n);
         group.throughput(Throughput::Bytes(text.len() as u64));
-
-        group.bench_with_input(BenchmarkId::new("legacy_shim", n), &text, |b, text| {
-            #[allow(deprecated)]
-            let cfg = ChunkerConfig::new(512);
-            b.iter(|| {
-                #[allow(deprecated)]
-                let _ = chunk_document(text, &cfg);
-            });
-        });
 
         group.bench_with_input(
             BenchmarkId::new("recursive_chars_512", n),

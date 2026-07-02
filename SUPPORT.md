@@ -74,6 +74,14 @@ migration. Maintainers accept this narrowly scoped risk for `v0.5.0` because
 include it, and dedicated feature checks remain green. Removal continues to be
 tracked in issue #67.
 
+The released `docx-lite 0.2.0` and `rust-s3 0.37.2` dependency constraints
+retain `quick-xml` versions affected by `RUSTSEC-2026-0194` and
+`RUSTSEC-2026-0195`; neither dependency currently permits the patched
+`quick-xml 0.41.0`. Crafted DOCX XML or responses from a configured S3
+endpoint can cause CPU or memory exhaustion. The exact advisory exceptions in
+`deny.toml` and `.cargo/audit.toml` are temporary and must be removed as soon
+as both upstream crates permit the patched version.
+
 ## Support Scope
 
 The project treats Linux and Windows release targets as the formal support boundary for CI, release verification, and issue triage priority.
