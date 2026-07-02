@@ -2,7 +2,16 @@
 version = 2
 # lopdf 0.42.0 still requires ttf-parser, and RUSTSEC-2026-0192 has no
 # patched release. Remove this exact exception when lopdf migrates away.
-ignore = ["RUSTSEC-2026-0192"]
+# docx-lite 0.2.0 and rust-s3 0.37.2 constrain quick-xml below the patched
+# 0.41.0 release. RUSTSEC-2026-0194 and RUSTSEC-2026-0195 are availability
+# risks for crafted DOCX XML or responses from a configured S3 endpoint.
+# Remove these exact exceptions as soon as both upstream crates permit
+# quick-xml 0.41.0 or later.
+ignore = [
+    "RUSTSEC-2026-0192",
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
 
 [licenses]
 version = 2
