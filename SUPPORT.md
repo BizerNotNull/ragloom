@@ -25,7 +25,7 @@ Ragloom publishes artifacts through:
 
 Maintainers should start releases from `.github/workflows/release.yml` using
 `workflow_dispatch` with an explicit crate version from `Cargo.toml`
-(for example `0.4.1`).
+(for example `0.5.0`).
 
 The release workflow verifies that:
 
@@ -43,16 +43,16 @@ published notes come from the repository event history rather than ad hoc local
 release text.
 
 GitHub Release archives are published with explicit target names such as
-`ragloom-v0.4.1-x86_64-unknown-linux-gnu.tar.gz` and
-`ragloom-v0.4.1-x86_64-pc-windows-msvc.zip`.
+`ragloom-v0.5.0-x86_64-unknown-linux-gnu.tar.gz` and
+`ragloom-v0.5.0-x86_64-pc-windows-msvc.zip`.
 
 Each published archive also includes a matching `.sha256.txt` checksum file.
 Release checksums are generated with a platform-aware command so Linux targets
 use `sha256sum` while macOS targets use `shasum -a 256`.
 
-## v0.4 Support Readiness
+## v0.5 Support Readiness
 
-For the current `v0.4` support surface, maintainers should treat the following
+For the current `v0.5` support surface, maintainers should treat the following
 as release-blocking for the commit being released:
 
 - `ci` is green for the release commit or release branch tip
@@ -65,6 +65,14 @@ The following are not release-blocking by default:
 
 - macOS artifact failures, unless maintainers explicitly promote macOS to a supported release target
 - experimental semantic chunking behavior, as long as the default non-semantic ingest path remains healthy
+
+The optional `fastembed` graph in `v0.5.0` retains `paste 1.0.15`, which is
+covered by the unmaintained-crate advisory `RUSTSEC-2024-0436`. There is no
+patched `paste` release, and upstream `tokenizers` has not completed its
+migration. Maintainers accept this narrowly scoped risk for `v0.5.0` because
+`fastembed` is experimental and opt-in, the default embedding path does not
+include it, and dedicated feature checks remain green. Removal continues to be
+tracked in issue #67.
 
 ## Support Scope
 
@@ -141,7 +149,7 @@ making released state unreadable is incompatible. Incompatible changes require r
 
 ## Feature Boundaries
 
-Core support boundary maintainers are hardening for the current `v0.4`
+Core support boundary maintainers are hardening for the current `v0.5`
 support boundary:
 
 - local filesystem ingestion under one configured directory, plus polling S3 ingestion under one configured bucket/prefix
